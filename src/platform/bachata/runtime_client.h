@@ -53,7 +53,8 @@ public:
     [[nodiscard]] bool IsEnabled() const;
     [[nodiscard]] int NativeHandleForTest() const;
 
-    bool SendHello(unsigned version = RuntimeProtocolVersion);
+    // A non-empty contract answers the Android 0.2.5 handshake (version=2 + launch nonce).
+    bool SendHello(unsigned version = RuntimeProtocolVersion, std::string_view contract = {});
     bool SendStarting();
     bool SendRunning();
     bool SendFramePresented();

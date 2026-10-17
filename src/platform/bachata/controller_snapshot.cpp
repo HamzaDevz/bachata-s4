@@ -78,6 +78,14 @@ std::optional<ControllerSnapshot> ParseControllerSnapshot(std::string_view line)
                 static_cast<float>(milli) / 1000.0f;
             result.has_motion = true;
             continue;
+        } else if (key == "touch2" || key == "tx2" || key == "ty2" ||
+                   key == "orientation_reset") {
+            // Android 0.2.5 extras (second touch point, gyro re-center): accepted, unused.
+            int extra = 0;
+            if (!ParseNumber(value, extra) || extra < 0 || extra > 1919) {
+                return std::nullopt;
+            }
+            continue;
         } else {
             int* target = nullptr;
             int maximum = 255;

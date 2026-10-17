@@ -29,6 +29,7 @@
 #include "imgui/big_picture/big_picture.h"
 #ifdef ENABLE_BACHATA_RUNTIME
 #include "platform/bachata/runtime_client.h"
+#include "platform/bachata/saf_client.h"
 #endif
 
 #ifdef _WIN32
@@ -212,6 +213,12 @@ int main(int argc, char* argv[]) {
     std::optional<std::filesystem::path> bachataSocket;
     std::optional<std::filesystem::path> bachataStorageRoot;
     std::optional<std::filesystem::path> patchSessionPath;
+    // Android 0.2.5 launch contract.
+    std::optional<std::string> bachataContract;
+    std::optional<std::string> bachataSafSocket;
+    std::optional<std::string> bachataSafToken;
+    std::optional<std::string> reconcileTrophies;
+    bool gravityRush540p = false;
 #endif
     std::optional<int> waitPid;
     bool waitForDebugger = false;
@@ -246,6 +253,11 @@ int main(int argc, char* argv[]) {
         ->check(CLI::ExistingDirectory);
     app.add_option("--patch-session", patchSessionPath,
                    "Managed patch launch session file (frozen snapshot staged by Android)");
+    app.add_option("--bachata-contract", bachataContract, "Android launch nonce echoed in HELLO");
+    app.add_option("--bachata-saf-socket", bachataSafSocket, "Android SAF broker socket name");
+    app.add_option("--bachata-saf-token", bachataSafToken, "Android SAF broker token");
+    app.add_option("--reconcile-trophies", reconcileTrophies, "Android trophy catalogue pass");
+    app.add_flag("--bachata-gravity-rush-540p", gravityRush540p);
 #endif
 
     app.add_flag("--wait-for-debugger", waitForDebugger);
@@ -285,6 +297,10 @@ int main(int argc, char* argv[]) {
     }
 
 #ifdef ENABLE_BACHATA_RUNTIME
+    if (reconcileTrophies.has_value()) {
+        // The catalogue service only reconciles the official runtime's trophy cache.
+        return 0;
+    }
     auto runtime_client = Platform::Bachata::RuntimeClient::Disabled();
     if (bachataSocket.has_value()) {
         if (!bachataStorageRoot.has_value() ||
@@ -293,7 +309,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         auto connected = Platform::Bachata::RuntimeClient::Connect(*bachataSocket);
-        if (!connected.has_value() || !connected->SendHello()) {
+        if (!connected.has_value() ||
+            !connected->SendHello(Platform::Bachata::RuntimeProtocolVersion,
+                                  bachataContract.value_or(""))) {
             std::cerr << "Failed to connect Bachata runtime socket\n";
             return 1;
         }
@@ -315,6 +333,25 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         MemoryPatcher::g_managed_session_path = *patchSessionPath;
+    }
+    if (bachataSafSocket.has_value() && gamePath.has_value() &&
+        !std::filesystem::path(*gamePath).is_absolute()) {
+        // "Direct" games: -g is relative to the SAF tree and --override-root is an empty
+        // staging dir. Resolve the real eboot and run it as a plain folder game, which also
+        // brings back the sibling -UPDATE lookup that --ignore-game-patch would disable.
+        std::string saf_error;
+        const auto resolved = Platform::Bachata::ResolveSafGamePath(
+            *bachataSafSocket, bachataSafToken.value_or(""), *gamePath, saf_error);
+        if (!resolved) {
+            std::cerr << "SAF game unavailable: " << saf_error << '\n';
+            runtime_client.SendError("CONTENT_INVALID");
+            runtime_client.SendStopped(1);
+            return 1;
+        }
+        std::cerr << "SAF game resolved to " << resolved->string() << '\n';
+        gamePath = resolved->string();
+        overrideRoot.reset();
+        ignoreGamePatch = false;
     }
 #endif
 

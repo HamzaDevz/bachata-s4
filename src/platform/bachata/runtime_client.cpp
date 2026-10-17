@@ -177,7 +177,10 @@ int RuntimeClient::NativeHandleForTest() const {
     return fd_;
 }
 
-bool RuntimeClient::SendHello(unsigned version) {
+bool RuntimeClient::SendHello(unsigned version, std::string_view contract) {
+    if (!contract.empty()) {
+        return SendLine("BACHATA/1 HELLO version=2 contract=" + std::string(contract) + "\n");
+    }
     return SendLine("BACHATA/1 HELLO version=" + std::to_string(version) + "\n");
 }
 
