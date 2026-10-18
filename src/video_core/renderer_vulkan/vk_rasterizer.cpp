@@ -16,6 +16,7 @@
 
 #include <array>
 #include <bit>
+#include <string>
 
 #include <vk_mem_alloc.h>
 #include "video_core/texture_cache/image_view.h"
@@ -664,6 +665,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u32 ubo_size = stage.flattened_ud_buf.size() * sizeof(u32);
                 const u64 offset =
                     vk_buffer.Copy(stage.flattened_ud_buf.data(), ubo_size, alignment);
+                if (first_launch) {
+                    std::string text;
+                    for (const u32 dword : stage.flattened_ud_buf) {
+                        text += fmt::format(" {:x}", dword);
+                    }
+                    LOG_INFO(Render_Vulkan, "BACHATA_FLATBUF {:#x}:{}", stage.pgm_hash, text);
+                }
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
             } else if (desc.buffer_type == Shader::BufferType::BdaPagetable) {
                 const auto* bda_buffer = buffer_cache.GetBdaPageTableBuffer();
