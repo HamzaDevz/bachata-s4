@@ -813,7 +813,7 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
         } else {
             return_info->hle_adapter = m_hle_symbols.AddUnsupportedFunction(sr);
         }
-        LOG_WARNING(Core_Linker, "FEX: unresolved HLE {} uses temporary ENOSYS fallback",
+        LOG_WARNING(Core_Linker, "FEX: unresolved HLE {} returns zero until a module exports it",
                     return_info->name);
         return false;
 #endif

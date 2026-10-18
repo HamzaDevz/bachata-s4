@@ -5,6 +5,7 @@
 #include "guest_cpu.h"
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -312,11 +313,21 @@ private:
     Return (*function)(Args...);
 };
 
+// An import nothing implements returns zero, as the x86 core's stubs do: games treat most such
+// calls (file system tuning, telemetry, dialogs) as optional, while ENOSYS trips their asserts.
 class UnsupportedHleCallAdapter final : public HleCallAdapter {
 public:
-    HleCallResult Invoke(HleCallFrame&) const override {
-        return HleCallFailure{ENOSYS, Name()};
+    HleCallResult Invoke(HleCallFrame& frame) const override {
+        if (!reported.test_and_set(std::memory_order_relaxed)) {
+            std::fprintf(stderr, "BACHATA_FEX_HLE_STUB name=%.*s returns zero\n",
+                         static_cast<int>(Name().size()), Name().data());
+        }
+        frame.gpr[0] = 0;
+        return true;
     }
+
+private:
+    mutable std::atomic_flag reported;
 };
 
 } // namespace detail
