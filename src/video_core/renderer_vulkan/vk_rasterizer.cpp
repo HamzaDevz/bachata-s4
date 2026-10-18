@@ -697,7 +697,18 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 vsharp.base_address, size, desc.is_written, desc.is_formatted, buffer_id);
             const u32 offset_aligned = Common::AlignDown(offset, alignment);
             const u32 adjust = offset - offset_aligned;
-            ASSERT(adjust % 4 == 0);
+            // The shader takes the offset in bytes, so byte and short accesses stay exact on a
+            // base that is not 4-aligned; dword accesses round it down, as the log says.
+            if (adjust % 4 != 0) {
+                static std::unordered_set<u64> logged;
+                if (logged.insert(stage.pgm_hash ^ (u64{binding.buffer} << 56)).second) {
+                    LOG_WARNING(Render_Vulkan,
+                                "BACHATA_UNALIGNED_BUFFER {:#x} binding={} base={:#x} size={:#x} "
+                                "types={:#x} stride={}",
+                                stage.pgm_hash, binding.buffer, vsharp.base_address, size,
+                                u32(desc.used_types), vsharp.GetStride());
+                }
+            }
             push_data.AddOffset(binding.buffer, adjust);
             buffer_infos.emplace_back(vk_buffer->Handle(), offset_aligned, size + adjust);
             if (auto barrier =
