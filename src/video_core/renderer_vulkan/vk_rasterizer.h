@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -148,6 +149,8 @@ private:
     u32 set_write_index{};
     const Pipeline* last_noted_pipeline{};
     u64 last_noted_tick{};
+    // Pipelines whose first indirect or direct launch was logged.
+    std::unordered_set<const Pipeline*> logged_launches;
     Pipeline::DescriptorWrites set_writes;
     Pipeline::BufferBarriers buffer_barriers;
     Shader::PushData push_data;
