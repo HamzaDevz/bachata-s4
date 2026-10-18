@@ -1034,6 +1034,64 @@ std::string DescribeValue(const IR::Value& value, const PassInfo& pass_info, int
     return text + ")";
 }
 
+// The values an offset depends on that the walker cannot read.
+std::string DescribeOffsetLeaves(const IR::Value& offset, const PassInfo& pass_info) {
+    std::vector<std::string> leaves;
+    std::vector<const IR::Inst*> queue;
+    std::vector<const IR::Inst*> visited;
+    if (!offset.IsImmediate()) {
+        queue.push_back(offset.InstRecursive());
+    }
+    while (!queue.empty()) {
+        const IR::Inst* inst = queue.back();
+        queue.pop_back();
+        if (std::ranges::find(visited, inst) != visited.end()) {
+            continue;
+        }
+        visited.push_back(inst);
+        std::string leaf;
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::GetUserData:
+            break;
+        case IR::Opcode::ReadConst:
+        case IR::Opcode::ReadConstBuffer:
+            if (!pass_info.slots.contains(inst)) {
+                leaf = DescribeValue(IR::Value{const_cast<IR::Inst*>(inst)}, pass_info, 2);
+            }
+            break;
+        case IR::Opcode::IAdd32:
+        case IR::Opcode::ISub32:
+        case IR::Opcode::IMul32:
+        case IR::Opcode::ShiftLeftLogical32:
+        case IR::Opcode::ShiftRightLogical32:
+        case IR::Opcode::BitwiseAnd32:
+        case IR::Opcode::BitwiseOr32:
+        case IR::Opcode::BitwiseXor32:
+        case IR::Opcode::BitwiseNot32:
+        case IR::Opcode::UMin32:
+        case IR::Opcode::UMax32:
+        case IR::Opcode::BitFieldUExtract:
+            for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+                if (!inst->Arg(arg).IsImmediate()) {
+                    queue.push_back(inst->Arg(arg).InstRecursive());
+                }
+            }
+            break;
+        default:
+            leaf = DescribeValue(IR::Value{const_cast<IR::Inst*>(inst)}, pass_info, 2);
+            break;
+        }
+        if (!leaf.empty() && std::ranges::find(leaves, leaf) == leaves.end()) {
+            leaves.push_back(std::move(leaf));
+        }
+    }
+    std::string text;
+    for (const std::string& leaf : leaves) {
+        text += (text.empty() ? "" : "; ") + leaf;
+    }
+    return text;
+}
+
 } // namespace
 
 void FlattenExtendedUserdataPass(IR::Program& program) {
@@ -1108,9 +1166,10 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
 
     const auto report = [&](const IR::Inst* load) {
         const IR::Inst* base = load->Arg(0).InstRecursive();
-        LOG_WARNING(Render_Recompiler, "SRT walker cannot copy {} from {}",
-                    DescribeValue(IR::Value{const_cast<IR::Inst*>(load)}, pass_info),
-                    DescribeValue(base->Arg(0), pass_info));
+        LOG_WARNING(Render_Recompiler, "SRT walker cannot copy {} from {}, offset needs {}",
+                    DescribeValue(IR::Value{const_cast<IR::Inst*>(load)}, pass_info, 2),
+                    DescribeValue(base->Arg(0), pass_info, 2),
+                    DescribeOffsetLeaves(load->Arg(1), pass_info));
     };
     for (IR::Inst* readconst : readconsts) {
         if (const auto slot = pass_info.FindSlot(readconst)) {
