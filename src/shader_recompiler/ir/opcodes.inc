@@ -449,6 +449,7 @@ OPCODE(WarpId,                                              U32,                
 OPCODE(QuadShuffle,                                         U32,            U32,            U32                                                             )
 OPCODE(ReadFirstLane,                                       U32,            U32,                                                                            )
 OPCODE(ReadLane,                                            U32,            U32,            U32                                                             )
+OPCODE(ShuffleXor,                                          U32,            U32,            U32                                                             )
 OPCODE(WriteLane,                                           U32,            U32,            U32,            U32                                             )
 OPCODE(Ballot,                                              U32x4,          U1,                                                                             )
 OPCODE(BallotFindLsb,                                       U32,            U32x4,                                                                          )

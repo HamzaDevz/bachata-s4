@@ -660,6 +660,10 @@ U32 IREmitter::ReadLane(const U32& value, const U32& lane) {
     return Inst<U32>(Opcode::ReadLane, value, lane);
 }
 
+U32 IREmitter::ShuffleXor(const U32& value, const U32& mask) {
+    return Inst<U32>(Opcode::ShuffleXor, value, mask);
+}
+
 U32 IREmitter::WriteLane(const U32& value, const U32& write_value, const U32& lane) {
     return Inst<U32>(Opcode::WriteLane, value, write_value, lane);
 }

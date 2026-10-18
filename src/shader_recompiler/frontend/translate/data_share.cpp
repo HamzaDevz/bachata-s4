@@ -278,19 +278,34 @@ void Translator::DS_SWIZZLE_B32(const GcnInst& inst) {
     const u8 offset1 = inst.control.ds.offset1;
     const IR::U32 src{GetSrc(inst.src[0])};
     const IR::U32 lane_id = ir.LaneId();
+    // Each lane reads another lane, so this is a shuffle: a broadcast or quad broadcast needs a
+    // uniform lane index, and Turnip hangs the GPU on one that differs per lane. The source lane
+    // is expressed as an xor of the own lane, a constant one for the usual butterfly patterns.
     if (offset1 & 0x80) {
+        u32 lane_xors{};
+        for (u32 lane = 0; lane < 4; ++lane) {
+            lane_xors |= (lane ^ ((offset0 >> (lane * 2)) & 3)) << (lane * 2);
+        }
+        if (lane_xors == (lane_xors & 3) * 0b01010101) {
+            SetDst(inst.dst[0], ir.ShuffleXor(src, ir.Imm32(lane_xors & 3)));
+            return;
+        }
         const IR::U32 id_in_group = ir.BitwiseAnd(lane_id, ir.Imm32(0b11));
         const IR::U32 base = ir.ShiftLeftLogical(id_in_group, ir.Imm32(1));
-        const IR::U32 index = ir.BitFieldExtract(ir.Imm32(offset0), base, ir.Imm32(2));
-        SetDst(inst.dst[0], ir.QuadShuffle(src, index));
+        const IR::U32 mask = ir.BitFieldExtract(ir.Imm32(lane_xors), base, ir.Imm32(2));
+        SetDst(inst.dst[0], ir.ShuffleXor(src, mask));
     } else {
         const u8 and_mask = (offset0 & 0x1f) | (~u8{0} << 5);
         const u8 or_mask = (offset0 >> 5) | ((offset1 & 0x3) << 3);
         const u8 xor_mask = offset1 >> 2;
+        if (and_mask == 0xff && or_mask == 0) {
+            SetDst(inst.dst[0], ir.ShuffleXor(src, ir.Imm32(xor_mask)));
+            return;
+        }
         const IR::U32 index = ir.BitwiseXor(
             ir.BitwiseOr(ir.BitwiseAnd(lane_id, ir.Imm32(and_mask)), ir.Imm32(or_mask)),
             ir.Imm32(xor_mask));
-        SetDst(inst.dst[0], ir.ReadLane(src, index));
+        SetDst(inst.dst[0], ir.ShuffleXor(src, ir.BitwiseXor(lane_id, index)));
     }
 }
 
