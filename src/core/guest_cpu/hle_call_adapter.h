@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -206,23 +207,25 @@ std::optional<T> DecodeArgument(CallCursor& cursor) {
     } else if constexpr (IsGuestPointer<T>) {
         const auto value = cursor.NextInteger();
         if (!value) return std::nullopt;
-        if (*value != 0) {
-            using PointedTo = std::remove_cv_t<std::remove_pointer_t<T>>;
-            constexpr std::size_t minimum_size = [] {
-                if constexpr (std::is_void_v<PointedTo> || !requires { sizeof(PointedTo); }) {
-                    return std::size_t{1};
-                } else {
-                    return sizeof(PointedTo);
-                }
-            }();
-            // Guest VMM only. HLE opaque handles (host new) live outside VMM;
-            // publish via PublishHostRange when possible. If still unmapped, allow
-            // non-null host-side addresses so FEX matches native x86 handle semantics.
-            if (cursor.frame.validate_range == nullptr ||
-                !cursor.frame.validate_range(cursor.frame.validate_context,
-                                             static_cast<std::uintptr_t>(*value), minimum_size,
-                                             !std::is_const_v<std::remove_pointer_t<T>>)) {
-                if (*value < 4096) {
+        using PointedTo = std::remove_cv_t<std::remove_pointer_t<T>>;
+        // Only a small non-null value is refused, and only when no guest or published range backs
+        // it: HLE opaque handles (host new) live outside the guest VMM, so FEX keeps native x86
+        // handle semantics. Checking just those values keeps the range lookup off every hot call.
+        // A void pointer is user data passed through untouched (thread argument, event udata, TLS
+        // value): games put small integers there too.
+        if constexpr (!std::is_void_v<PointedTo>) {
+            if (*value != 0 && *value < 4096) {
+                constexpr std::size_t minimum_size = [] {
+                    if constexpr (!requires { sizeof(PointedTo); }) {
+                        return std::size_t{1};
+                    } else {
+                        return sizeof(PointedTo);
+                    }
+                }();
+                if (cursor.frame.validate_range == nullptr ||
+                    !cursor.frame.validate_range(cursor.frame.validate_context,
+                                                 static_cast<std::uintptr_t>(*value), minimum_size,
+                                                 !std::is_const_v<std::remove_pointer_t<T>>)) {
                     return std::nullopt;
                 }
             }
@@ -264,6 +267,16 @@ public:
             CallCursor cursor{frame};
             std::tuple<std::optional<Args>...> decoded{DecodeArgument<Args>(cursor)...};
             if (!AllDecoded(decoded, std::index_sequence_for<Args...>{})) {
+                std::fprintf(stderr,
+                             "BACHATA_FEX_HLE_EFAULT name=%.*s rdi=%#llx rsi=%#llx rdx=%#llx "
+                             "rcx=%#llx r8=%#llx r9=%#llx\n",
+                             static_cast<int>(Name().size()), Name().data(),
+                             static_cast<unsigned long long>(frame.gpr[7]),
+                             static_cast<unsigned long long>(frame.gpr[6]),
+                             static_cast<unsigned long long>(frame.gpr[2]),
+                             static_cast<unsigned long long>(frame.gpr[1]),
+                             static_cast<unsigned long long>(frame.gpr[8]),
+                             static_cast<unsigned long long>(frame.gpr[9]));
                 return HleCallFailure{EFAULT, Name()};
             }
             if constexpr (std::is_void_v<Return>) {
