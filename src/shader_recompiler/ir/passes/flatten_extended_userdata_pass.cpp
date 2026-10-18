@@ -22,7 +22,9 @@
 #include "core/signals.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/breadth_first_search.h"
+#include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/opcodes.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reg.h"
@@ -552,11 +554,14 @@ void VisitPointer(u32 offset_dw, IR::Inst* subtree, PassInfo& pass_info,
 
     for (auto [source_offset_dw, use] : *use_list) {
         emitter.CopyDword(source_offset_dw, pass_info.dst_off_dw);
-        use->SetFlags<u32>(pass_info.dst_off_dw++);
+        if (use != nullptr) {
+            use->SetFlags<u32>(pass_info.dst_off_dw);
+        }
+        ++pass_info.dst_off_dw;
     }
 
     for (const auto [source_offset_dw, use] : *use_list) {
-        if (pass_info.GetUsesAsPointer(use)) {
+        if (use != nullptr && pass_info.GetUsesAsPointer(use)) {
             VisitPointer(source_offset_dw, use, pass_info, emitter);
         }
     }
@@ -581,6 +586,71 @@ void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     ASSERT(info.srt_info.walker_func != nullptr);
     info.srt_info.walker_func_size = emitter.Size();
     info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
+}
+
+// Buffer loads that give the first dword of a resource descriptor (bindless: s_buffer_load of a T#,
+// V# or S# out of a table that a V# points to). Seen through phis, as the resource pass does, and
+// through the select that turns sampler anisotropy off for textures without mips.
+std::vector<IR::Inst*> FindSharpBufferLoads(const IR::Program& program) {
+    std::vector<IR::Inst*> loads;
+    std::vector<const IR::Inst*> visited;
+    const auto visit = [&](const IR::Value& handle) {
+        if (handle.IsImmediate()) {
+            return;
+        }
+        std::vector<IR::Inst*> queue{handle.InstRecursive()};
+        while (!queue.empty()) {
+            IR::Inst* inst = queue.back();
+            queue.pop_back();
+            if (std::ranges::find(visited, inst) != visited.end()) {
+                continue;
+            }
+            visited.push_back(inst);
+            if (inst->GetOpcode() == IR::Opcode::ReadConstBuffer) {
+                loads.push_back(inst);
+            } else if (inst->GetOpcode() == IR::Opcode::Phi ||
+                       inst->GetOpcode() == IR::Opcode::SelectU32) {
+                for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+                    if (!inst->Arg(arg).IsImmediate()) {
+                        queue.push_back(inst->Arg(arg).InstRecursive());
+                    }
+                }
+            }
+        }
+    };
+    for (const IR::Block* block : program.blocks) {
+        for (const IR::Inst& inst : block->Instructions()) {
+            if (IsImageInstruction(inst)) {
+                visit(inst.Arg(0));
+                const IR::Inst* sampler = inst.GetOpcode() == IR::Opcode::ImageSampleRaw
+                                              ? inst.Arg(1).TryInstRecursive()
+                                              : nullptr;
+                if (sampler != nullptr &&
+                    sampler->GetOpcode() == IR::Opcode::CompositeConstructU32x4 &&
+                    !sampler->AreAllArgsImmediates()) {
+                    visit(sampler->Arg(0));
+                }
+            } else if (IsBufferInstruction(inst)) {
+                const IR::Inst* vsharp = inst.Arg(0).TryInstRecursive();
+                if (vsharp != nullptr && !vsharp->AreAllArgsImmediates()) {
+                    visit(vsharp->Arg(0));
+                }
+            }
+        }
+    }
+    return loads;
+}
+
+// A sharp read from a buffer becomes a flat user data read, like the s_load of a pointer table: the
+// walker takes the buffer base out of the V# (its first 48 bits) and copies the descriptor.
+void ReplaceSharpBufferLoad(IR::Inst* load) {
+    IR::Inst* vsharp = load->Arg(0).InstRecursive();
+    IR::IREmitter ir{*load->GetParent(), IR::Block::InstructionList::s_iterator_to(*load)};
+    const IR::Value base = ir.CompositeConstruct(
+        vsharp->Arg(0), ir.BitwiseAnd(IR::U32{vsharp->Arg(1)}, ir.Imm32(0xffffu)));
+    const IR::U32 value = ir.ReadConst(base, IR::U32{load->Arg(1)});
+    value.Inst()->SetFlags<u32>(load->Flags<u32>());
+    load->ReplaceUsesWith(value);
 }
 
 } // namespace
@@ -629,11 +699,57 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         }
     }
 
+    // Sharp buffer loads hang off the V# base like ReadConsts off a pointer. A descriptor is up to
+    // eight dwords and is read back from consecutive flat slots, so the dwords after its first
+    // are copied too even when the shader loads none of them.
+    std::vector<std::pair<IR::Inst*, IR::Inst*>> sharp_loads;
+    for (IR::Inst* load : FindSharpBufferLoads(program)) {
+        if (!load->Arg(1).IsImmediate()) {
+            continue;
+        }
+        IR::Inst* vsharp = load->Arg(0).TryInstRecursive();
+        if (vsharp == nullptr || vsharp->GetOpcode() != IR::Opcode::CompositeConstructU32x4) {
+            continue;
+        }
+        const auto pred = [](IR::Inst* candidate) -> std::optional<IR::Inst*> {
+            if (candidate->GetOpcode() == IR::Opcode::GetUserData ||
+                candidate->GetOpcode() == IR::Opcode::ReadConst) {
+                return candidate;
+            }
+            return std::nullopt;
+        };
+        auto base0 = IR::BreadthFirstSearch(vsharp->Arg(0), pred);
+        auto base1 = IR::BreadthFirstSearch(vsharp->Arg(1), pred);
+        if (!base0 || !base1) {
+            continue;
+        }
+        IR::Inst* ptr_lo = pass_info.DeduplicateInstruction(base0.value());
+        auto& uses = pass_info.pointer_uses[ptr_lo];
+        const u32 index = load->Arg(1).U32();
+        auto [slot, inserted] = uses.try_emplace(index, load);
+        if (!inserted && slot->second == nullptr) {
+            slot->second = load;
+        }
+        sharp_loads.emplace_back(load, slot->second);
+        for (u32 dword = 1; dword < 8; ++dword) {
+            uses.try_emplace(index + dword, nullptr);
+        }
+        if (ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
+            pass_info.srt_roots[ptr_lo->Arg(0).ScalarReg()] = ptr_lo;
+        }
+    }
+
     GenerateSrtProgram(info, pass_info);
     for (IR::Inst* readconst : all_readconsts) {
         ASSERT(pass_info.vn_to_inst.contains(pass_info.gvn_table.GetValueNumber(readconst)));
         IR::Inst* original = pass_info.DeduplicateInstruction(readconst);
         readconst->SetFlags<u32>(original->Flags<u32>());
+    }
+    for (const auto& [load, original] : sharp_loads) {
+        load->SetFlags<u32>(original->Flags<u32>());
+    }
+    for (const auto& [load, original] : sharp_loads) {
+        ReplaceSharpBufferLoad(load);
     }
     info.RefreshFlatBuf();
 }

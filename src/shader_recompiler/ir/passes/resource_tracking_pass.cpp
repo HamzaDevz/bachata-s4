@@ -7,6 +7,7 @@
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/operand_helper.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
@@ -66,6 +67,8 @@ bool IsBufferStore(const IR::Inst& inst) {
     }
 }
 
+} // namespace
+
 bool IsBufferInstruction(const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::LoadBufferU8:
@@ -86,6 +89,8 @@ bool IsBufferInstruction(const IR::Inst& inst) {
         return IsBufferStore(inst);
     }
 }
+
+namespace {
 
 bool IsDataRingInstruction(const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
@@ -224,6 +229,8 @@ bool IsImageAtomicInstruction(const IR::Inst& inst) {
     }
 }
 
+} // namespace
+
 bool IsImageInstruction(const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::ImageRead:
@@ -236,6 +243,8 @@ bool IsImageInstruction(const IR::Inst& inst) {
         return IsImageAtomicInstruction(inst);
     }
 }
+
+namespace {
 
 class Descriptors {
 public:
