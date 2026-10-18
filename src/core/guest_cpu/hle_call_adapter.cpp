@@ -89,6 +89,40 @@ HleVeneerResult HleVeneerAllocator::Allocate(const HleCallAdapter& adapter) {
     return address;
 }
 
+HleVeneerResult HleVeneerAllocator::AllocateCode(std::span<const u8> code) {
+    std::scoped_lock lock{allocator_mutex};
+    if (code.empty()) {
+        return HleVeneerFailure{EINVAL};
+    }
+    if (const auto cached = code_blocks.find(code.data()); cached != code_blocks.end()) {
+        return cached->second;
+    }
+    const auto page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        return HleVeneerFailure{errno == 0 ? EIO : errno};
+    }
+    const auto size = (code.size() + page_size - 1) / page_size * page_size;
+    void* const page = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+        return HleVeneerFailure{errno};
+    }
+    std::memcpy(page, code.data(), code.size());
+    if (mprotect(page, size, PROT_READ | PROT_EXEC) != 0) {
+        const int error = errno;
+        if (munmap(page, size) != 0) {
+            std::abort();
+        }
+        return HleVeneerFailure{error};
+    }
+    allocations.emplace_back(page, size);
+    executable_ranges.push_back({reinterpret_cast<std::uintptr_t>(page), size, true, false});
+    const auto address = reinterpret_cast<u64>(page);
+    std::fprintf(stderr, "BACHATA_FEX_GUEST_CODE address=%#llx size=%zu\n",
+                 static_cast<unsigned long long>(address), code.size());
+    code_blocks.emplace(code.data(), address);
+    return address;
+}
+
 std::vector<GuestExecutionRange> HleVeneerAllocator::GetExecutableRanges() const {
     std::scoped_lock lock{allocator_mutex};
     return executable_ranges;

@@ -35,6 +35,8 @@ struct SymbolRecord {
 #ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
     std::shared_ptr<GuestCpu::HleCallAdapter> hle_adapter;
     bool hle_fallback{};
+    // x86-64 code the guest runs itself; virtual_address is then the function's offset in it.
+    std::span<const u8> guest_code{};
 #endif
 };
 
@@ -55,6 +57,7 @@ public:
     void AddSymbol(const SymbolResolver& s, u64 virtual_addr);
 #ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
     void AddFunction(const SymbolResolver& s, std::shared_ptr<GuestCpu::HleCallAdapter> adapter);
+    void AddGuestFunction(const SymbolResolver& s, std::span<const u8> code, u64 offset);
     const std::shared_ptr<GuestCpu::HleCallAdapter>& AddUnsupportedFunction(const SymbolResolver& s);
     std::shared_ptr<GuestCpu::HleCallAdapter> FindFunction(u64 operation) const;
     GuestCpu::HleCallRegistry& GetHleCallRegistry();

@@ -723,6 +723,15 @@ void Linker::Relocate(Module* module) {
                 } else {
                     symbol_virtual_addr = std::get<u64>(veneer);
                 }
+            } else if (rel_sym_type == Loader::SymbolType::Function && !symrec.guest_code.empty()) {
+                const auto code = m_hle_veneers->AllocateCode(symrec.guest_code);
+                if (const auto* failure = std::get_if<GuestCpu::HleVeneerFailure>(&code)) {
+                    LOG_ERROR(Core_Linker, "Unable to map FEX guest code for {}: {}", symrec.name,
+                              failure->error);
+                    symbol_virtual_addr = 0;
+                } else {
+                    symbol_virtual_addr = std::get<u64>(code) + symrec.virtual_address;
+                }
             }
 #endif
             rel_is_resolved = (symbol_virtual_addr != 0);

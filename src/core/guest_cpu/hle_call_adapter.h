@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -98,6 +99,8 @@ public:
     ~HleVeneerAllocator();
 
     HleVeneerResult Allocate(const HleCallAdapter& adapter);
+    // Maps x86-64 code that runs in the guest (a library FEX executes itself) once per block.
+    HleVeneerResult AllocateCode(std::span<const u8> code);
 
     [[nodiscard]] std::vector<GuestExecutionRange> GetExecutableRanges() const;
     // Dynamic modules allocate veneers after FEX thread start. FEX JIT must
@@ -116,6 +119,7 @@ private:
     std::vector<Allocation> allocations;
     std::vector<GuestExecutionRange> executable_ranges;
     std::unordered_map<u64, u64> veneers;
+    std::unordered_map<const u8*, u64> code_blocks;
 };
 
 namespace detail {

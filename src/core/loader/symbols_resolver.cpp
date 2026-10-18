@@ -42,6 +42,11 @@ void SymbolsResolver::AddFunction(const SymbolResolver& s,
     m_symbols.emplace_back(name, s.nidName, 0, std::move(adapter));
 }
 
+void SymbolsResolver::AddGuestFunction(const SymbolResolver& s, std::span<const u8> code,
+                                       u64 offset) {
+    m_symbols.emplace_back(GenerateName(s), s.nidName, offset, nullptr, false, code);
+}
+
 const std::shared_ptr<GuestCpu::HleCallAdapter>&
 SymbolsResolver::AddUnsupportedFunction(const SymbolResolver& s) {
     const std::string name = GenerateName(s);

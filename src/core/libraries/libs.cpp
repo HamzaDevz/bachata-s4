@@ -145,7 +145,7 @@ void InitHLELibs(Core::Loader::SymbolsResolver* sym) {
     Libraries::Remoteplay::RegisterLib(sym);
     Libraries::RazorCpu::RegisterLib(sym);
     Libraries::Move::RegisterLib(sym);
-#ifdef ARCH_X86_64
+#if defined(ARCH_X86_64) || defined(SHADPS4_ENABLE_FEX_GUEST_CPU)
     Libraries::Fiber::RegisterLib(sym);
 #endif
     Libraries::Mouse::RegisterLib(sym);

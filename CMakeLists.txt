@@ -1005,6 +1005,9 @@ if (ENABLE_FEX_GUEST_CPU)
         src/core/guest_cpu/guest_callback.h
         src/core/guest_cpu/hle_call_adapter.cpp
         src/core/guest_cpu/hle_call_adapter.h
+        src/core/libraries/fiber/fiber.h
+        src/core/libraries/fiber/fiber_fex.cpp
+        src/core/libraries/fiber/fiber_guest.inc
     )
 endif()
 
