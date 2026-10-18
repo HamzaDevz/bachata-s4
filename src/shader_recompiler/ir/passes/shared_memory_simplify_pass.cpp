@@ -58,12 +58,17 @@ IR::Type CalculateSpecialSharedAtomicTypes(IR::Program& program) {
     return extra_atomic_types;
 }
 
-// Simplifies down U16 and U64 shared memory operations to U32 when aliasing is not supported and
-// atomics of the same type are not used.
+// Simplifies down U16 and U64 shared memory operations to U32 when atomics of the same type are
+// not used. U64 operations are split even when aliasing is supported: a shader that clears two
+// dwords with one U64 store and then reads them as U32 must not depend on the driver keeping
+// the aliased views ordered, or it reads stale counters and can loop for billions of iterations.
+// U16 stores stay narrow when aliasing is supported, as a read-modify-write of their dword would
+// race with the lane storing its other half.
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile) {
-    if (program.info.stage != Stage::Compute || profile.supports_workgroup_explicit_memory_layout) {
+    if (program.info.stage != Stage::Compute) {
         return;
     }
+    const bool split_u16 = !profile.supports_workgroup_explicit_memory_layout;
 
     const auto atomic_types = CalculateSpecialSharedAtomicTypes(program);
     if (True(atomic_types & IR::Type::U16) && True(atomic_types & IR::Type::U64)) {
@@ -80,7 +85,7 @@ void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile) {
             }
             IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
             const IR::U32 offset{inst.Arg(0)};
-            if (False(atomic_types & IR::Type::U16)) {
+            if (split_u16 && False(atomic_types & IR::Type::U16)) {
                 switch (inst.GetOpcode()) {
                 case IR::Opcode::LoadSharedU16: {
                     const IR::U32 dword_offset{ir.BitwiseAnd(offset, ir.Imm32(~3U))};
