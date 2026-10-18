@@ -303,8 +303,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
         .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
+        // Turnip gives no cross-lane shared memory visibility without a barrier, even inside one
+        // wave: a lane 0 store was not seen by the other lanes of U4's light culling shader.
         .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
-                              instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
+                              instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp ||
+                              instance.GetDriverID() == vk::DriverId::eMesaTurnip,
         .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
