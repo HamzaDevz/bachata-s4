@@ -54,6 +54,9 @@ private:
     std::unique_ptr<Frontend::WindowSDL> window;
     std::chrono::steady_clock::time_point start_time;
     std::jthread play_time_thread;
+#ifdef ENABLE_BACHATA_RUNTIME
+    std::jthread usage_thread;
+#endif
 };
 
 } // namespace Core

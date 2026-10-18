@@ -53,11 +53,118 @@
 #endif
 #include <core/file_format/npbind.h>
 
+#ifdef ENABLE_BACHATA_RUNTIME
+#include <algorithm>
+#include <functional>
+#include <limits>
+#include <unordered_map>
+#include <utility>
+#include "video_core/renderer_vulkan/vk_presenter.h"
+
+extern std::unique_ptr<Vulkan::Presenter> presenter;
+#endif
+
 Frontend::WindowSDL* g_window = nullptr;
 
 namespace Core {
 
 std::mutex exit_mutex{};
+
+#ifdef ENABLE_BACHATA_RUNTIME
+// Handheld sessions last hours and every area loads its own work: a thread that starts spinning
+// or memory that keeps growing somewhere late in a game has to show up in the session log, not
+// only as heat or as a kill by the low memory killer. One line per interval keeps it cheap.
+class UsageSampler {
+public:
+    UsageSampler() {
+        Sample();
+    }
+
+    void Log() {
+        const double seconds = std::chrono::duration<double>(Sample()).count();
+        std::ranges::sort(threads, std::greater{});
+        double total = 0.0;
+        std::string top;
+        for (size_t i = 0; i < threads.size(); ++i) {
+            const double cores = static_cast<double>(threads[i].first) / ticks_per_second / seconds;
+            total += cores;
+            if (i < 6) {
+                top += fmt::format("{}{} {:.2f}", i ? ", " : "", threads[i].second, cores);
+            }
+        }
+        u64 gpu_mb = 0;
+        if (const auto* p = presenter.get(); p && p->GetInstance().CanReportMemoryUsage()) {
+            gpu_mb = p->GetInstance().GetDeviceMemoryUsage() >> 20;
+        }
+        LOG_INFO(Core, "BACHATA_USAGE cpu={:.2f} rss={}MB avail={}MB gpu={}MB threads={} top: {}",
+                 total, ReadRssMb(), ReadAvailableMb(), gpu_mb, threads.size(), top);
+    }
+
+private:
+    // Collects the CPU ticks each thread used since the previous sample.
+    std::chrono::steady_clock::duration Sample() {
+        std::unordered_map<int, u64> ticks;
+        threads.clear();
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator{"/proc/self/task", ec}) {
+            std::ifstream stat{entry.path() / "stat"};
+            std::string line;
+            if (!std::getline(stat, line)) {
+                continue;
+            }
+            // The name sits in parentheses and may hold spaces; utime and stime are the 14th
+            // and 15th fields, the 12th and 13th after it.
+            const auto open = line.find('(');
+            const auto close = line.rfind(')');
+            if (open == std::string::npos || close == std::string::npos) {
+                continue;
+            }
+            std::istringstream fields{line.substr(close + 1)};
+            std::string field;
+            u64 used = 0;
+            for (int i = 3; i <= 15 && fields >> field; ++i) {
+                if (i >= 14) {
+                    used += std::strtoull(field.c_str(), nullptr, 10);
+                }
+            }
+            const int tid = std::atoi(entry.path().filename().c_str());
+            ticks[tid] = used;
+            const auto last = last_ticks.find(tid);
+            threads.emplace_back(used - (last != last_ticks.end() ? last->second : 0),
+                                 line.substr(open + 1, close - open - 1));
+        }
+        last_ticks = std::move(ticks);
+        const auto now = std::chrono::steady_clock::now();
+        return now - std::exchange(last_time, now);
+    }
+
+    static u64 ReadRssMb() {
+        std::ifstream statm{"/proc/self/statm"};
+        u64 size = 0;
+        u64 resident = 0;
+        statm >> size >> resident;
+        return resident * static_cast<u64>(sysconf(_SC_PAGESIZE)) >> 20;
+    }
+
+    static u64 ReadAvailableMb() {
+        std::ifstream meminfo{"/proc/meminfo"};
+        std::string key;
+        u64 kb = 0;
+        while (meminfo >> key >> kb) {
+            if (key == "MemAvailable:") {
+                return kb >> 10;
+            }
+            meminfo.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        }
+        return 0;
+    }
+
+    const double ticks_per_second = static_cast<double>(sysconf(_SC_CLK_TCK));
+    std::unordered_map<int, u64> last_ticks;
+    std::vector<std::pair<u64, std::string>> threads;
+    std::chrono::steady_clock::time_point last_time;
+};
+#endif
 
 Emulator::Emulator() {
     // Initialize NT API functions, set high priority and disable WER
@@ -534,6 +641,16 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
             }
         });
     }
+
+#ifdef ENABLE_BACHATA_RUNTIME
+    usage_thread = std::jthread([](std::stop_token stop) {
+        Common::SetCurrentThreadName("BachataUsage");
+        UsageSampler sampler;
+        while (Common::StoppableTimedWait(stop, std::chrono::seconds(30))) {
+            sampler.Log();
+        }
+    });
+#endif
 
     linker->Execute(args);
     if (onRuntimeRunning) {
