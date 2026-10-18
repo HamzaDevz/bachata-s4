@@ -501,7 +501,7 @@ void VideoOutDriver::ApplyDueLabelRetirement() {
     }
     main_port.buffer_labels[*index] = 0;
     main_port.SignalVoLabel();
-    LOG_INFO(Lib_VideoOut, "retired scanout label index={}", *index);
+    LOG_DEBUG(Lib_VideoOut, "retired scanout label index={}", *index);
 }
 
 } // namespace Libraries::VideoOut

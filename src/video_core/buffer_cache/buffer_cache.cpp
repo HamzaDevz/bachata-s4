@@ -87,6 +87,14 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
         device_addr, size, [this, device_addr, size] { ReadMemory(device_addr, size, true); });
 }
 
+void BufferCache::InvalidateFaultMemory(VAddr device_addr) {
+    if (!IsRegionRegistered(device_addr, 8)) {
+        return;
+    }
+    memory_tracker->InvalidateFaultRegion(
+        device_addr, [this, device_addr] { ReadMemory(device_addr, 8, true); });
+}
+
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
     liverpool->SendCommand<true>([this, device_addr, size, is_write] {
         Buffer& buffer = slot_buffers[FindBuffer(device_addr, size)];

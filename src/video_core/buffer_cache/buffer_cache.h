@@ -112,6 +112,9 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size);
 
+    /// Invalidates the page of a CPU write fault and the clean pages after it in its block.
+    void InvalidateFaultMemory(VAddr device_addr);
+
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 

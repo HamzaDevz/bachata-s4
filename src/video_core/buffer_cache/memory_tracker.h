@@ -88,6 +88,39 @@ public:
             });
     }
 
+    /// Like InvalidateRegion for a CPU write fault at cpu_addr, but also marks the following
+    /// pages of the same 64 KB block as CPU modified while the GPU has not modified them. Their
+    /// GPU copy still matches guest memory, so this costs at most a redundant upload, while a
+    /// guest filling a buffer sequentially takes one fault per block instead of one per page.
+    void InvalidateFaultRegion(VAddr cpu_addr, auto&& on_flush) noexcept {
+        constexpr u64 FAULT_BLOCK_PAGES = 16;
+        IteratePages<false>(
+            cpu_addr, 1, [&on_flush](RegionManager* manager, u64 offset, size_t size) {
+                const bool should_flush = [&] {
+                    std::scoped_lock lk{manager->lock};
+                    if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled &&
+                        manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                        return true;
+                    }
+                    const auto& gpu = manager->template GetRegionBits<Type::GPU>();
+                    const u64 page = offset / TRACKER_BYTES_PER_PAGE;
+                    const u64 block_end = std::min<u64>(
+                        (page / FAULT_BLOCK_PAGES + 1) * FAULT_BLOCK_PAGES, NUM_PAGES_PER_REGION);
+                    u64 end = page + 1;
+                    while (end < block_end && !gpu.Get(end)) {
+                        ++end;
+                    }
+                    manager->template ChangeRegionState<Type::CPU, true>(
+                        manager->GetCpuAddr() + page * TRACKER_BYTES_PER_PAGE,
+                        (end - page) * TRACKER_BYTES_PER_PAGE);
+                    return false;
+                }();
+                if (should_flush) {
+                    on_flush();
+                }
+            });
+    }
+
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, bool is_written, auto&& func,
                             auto&& on_upload) {
