@@ -185,8 +185,16 @@ inline constexpr bool FitsIntegerRegister = [] {
     return false;
 }();
 
+// A struct or union of up to eight bytes passed by value travels in one integer register, the way
+// SysV passes the bitfield unions of the audio APIs.
 template <typename T>
-inline constexpr bool IsSupportedArgument = FitsIntegerRegister<T> || IsVectorArgument<T>;
+inline constexpr bool IsSmallAggregateArgument =
+    (std::is_class_v<T> || std::is_union_v<T>) && sizeof(T) <= sizeof(u64) &&
+    std::is_default_constructible_v<T> && std::is_trivially_destructible_v<T>;
+
+template <typename T>
+inline constexpr bool IsSupportedArgument = FitsIntegerRegister<T> || IsVectorArgument<T> ||
+                                            IsSmallAggregateArgument<T>;
 
 template <typename T>
 inline constexpr bool IsSupportedReturn = std::is_void_v<T> ||
@@ -232,6 +240,12 @@ std::optional<T> DecodeArgument(CallCursor& cursor) {
             }
         }
         return reinterpret_cast<T>(static_cast<std::uintptr_t>(*value));
+    } else if constexpr (IsSmallAggregateArgument<T>) {
+        const auto value = cursor.NextInteger();
+        if (!value) return std::nullopt;
+        T result{};
+        std::memcpy(&result, &*value, sizeof(result));
+        return result;
     } else {
         const auto value = cursor.NextInteger();
         if (!value) return std::nullopt;
