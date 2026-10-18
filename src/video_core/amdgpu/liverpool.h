@@ -249,6 +249,7 @@ private:
     std::thread::id gpu_id;
     std::atomic<bool> in_gfx_task{false};
     s32 curr_qid{-1};
+    u64 work_done{}; ///< Packets and commands run by the GPU thread, to spot rounds that only wait
 #ifdef ENABLE_BACHATA_RUNTIME
     u32 debug_last_opcode{};
     u64 debug_resume_count{};

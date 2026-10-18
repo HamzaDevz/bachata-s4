@@ -109,6 +109,7 @@ void Liverpool::ProcessCommands() {
             --num_commands;
         }
         callback();
+        ++work_done;
     }
 }
 
@@ -129,8 +130,11 @@ void Liverpool::Process(std::stop_token stoken) {
         VideoCore::StartCapture();
 
         curr_qid = -1;
+        u32 idle_resumes = 0;
+        std::chrono::microseconds idle_sleep{};
 
         while (num_submits || num_commands) {
+            const u64 work_before = work_done;
             ProcessCommands();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;
@@ -156,7 +160,8 @@ void Liverpool::Process(std::stop_token stoken) {
             }
 #endif
 
-            if (task.done()) {
+            const bool task_done = task.done();
+            if (task_done) {
                 task.destroy();
 
                 std::scoped_lock lock{queue.m_access};
@@ -165,6 +170,21 @@ void Liverpool::Process(std::stop_token stoken) {
                 --num_submits;
                 std::scoped_lock lock2{submit_mutex};
                 submit_cv.notify_all();
+            }
+
+            // Every queue left is waiting on memory that the guest CPU or a host callback has yet to
+            // write: sleep a little between rounds instead of spinning a core until it lands.
+            if (work_done != work_before || task_done) {
+                idle_resumes = 0;
+                idle_sleep = {};
+            } else if (++idle_resumes >= 64) {
+                idle_resumes = 0;
+                idle_sleep = std::min(std::max(idle_sleep * 2, std::chrono::microseconds{20}),
+                                      std::chrono::microseconds{500});
+                std::unique_lock lk{submit_mutex};
+                const u32 submits = num_submits;
+                submit_cv.wait_for(lk, idle_sleep,
+                                   [&] { return num_commands || num_submits != submits; });
             }
         }
 
@@ -186,6 +206,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
 
     while (!ccb.empty()) {
         ProcessCommands();
+        ++work_done;
 
         const auto* header = reinterpret_cast<const PM4Header*>(ccb.data());
         const u32 type = header->type;
@@ -321,6 +342,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
         ProcessCommands();
+        ++work_done;
 
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
@@ -1113,6 +1135,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     size_t acb_size = acb.size_bytes();
     while (!acb.empty()) {
         ProcessCommands();
+        ++work_done;
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
         // Type-1 REG_B lives in the type-3 count field. Size from type first.
