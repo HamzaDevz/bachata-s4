@@ -7,6 +7,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 #include <boost/container/flat_map.hpp>
@@ -406,9 +407,9 @@ public:
         Emit(Arm64MovX2X0);
     }
 
-    void PushPointer(u32 offset_dw) {
+    // Saves the pointer in x2 and replaces it with the one at byte offset x4 from it.
+    void PushPointer() {
         Emit(Arm64PushX2);
-        MoveImmediate(4, static_cast<u64>(offset_dw) * sizeof(u32));
         Emit(Arm64LoadPointer);
         Emit(Arm64MaskPointer);
     }
@@ -417,20 +418,63 @@ public:
         Emit(Arm64PopX2);
     }
 
+    void SetSourceOffset(u32 offset_dw) {
+        MoveImmediate(4, static_cast<u64>(offset_dw) * sizeof(u32));
+    }
+
+    // x4 = the dword index in w<reg>, zero extended, as a byte offset.
+    void SetSourceOffsetFromRegister(u32 reg) {
+        Emit(0xd37e7c04u | (reg << 5)); // ubfiz x4, x<reg>, #2, #32
+    }
+
     void CopyDword(u32 source_offset_dw, u32 destination_offset_dw) {
         if (source_offset_dw <= 0xfff) {
             Emit(0xb9400043u | (source_offset_dw << 10));
         } else {
-            MoveImmediate(4, static_cast<u64>(source_offset_dw) * sizeof(u32));
+            SetSourceOffset(source_offset_dw);
             Emit(Arm64LoadDataRegisterOffset);
         }
+        StoreDword(destination_offset_dw);
+    }
 
-        if (destination_offset_dw <= 0xfff) {
-            Emit(0xb9000023u | (destination_offset_dw << 10));
-        } else {
-            MoveImmediate(5, static_cast<u64>(destination_offset_dw) * sizeof(u32));
-            Emit(Arm64StoreDataRegisterOffset);
+    // Copies consecutive dwords from byte offset x4 of the pointer in x2.
+    void CopyDwordsAtSourceOffset(u32 count, u32 destination_offset_dw) {
+        for (u32 dword = 0; dword < count; ++dword) {
+            if (dword != 0) {
+                Emit(0x91001084u); // add x4, x4, #4
+            }
+            Emit(Arm64LoadDataRegisterOffset);
+            StoreDword(destination_offset_dw + dword);
         }
+    }
+
+    // w<reg> = a flat buffer dword: user data, or a value this walker already copied.
+    void LoadFlatDword(u32 reg, u32 offset_dw) {
+        if (offset_dw <= 0xfff) {
+            Emit(0xb9400020u | (offset_dw << 10) | reg);
+        } else {
+            MoveImmediate(5, static_cast<u64>(offset_dw) * sizeof(u32));
+            Emit(0xb8656820u | reg); // ldr w<reg>, [x1, x5]
+        }
+    }
+
+    void MoveImmediate32(u32 reg, u32 value) {
+        Emit(0x52800000u | reg | ((value & 0xffff) << 5));
+        if ((value >> 16) != 0) {
+            Emit(0x72a00000u | reg | ((value >> 16) << 5));
+        }
+    }
+
+    void Emit(u32 instruction) {
+        code.push_back(instruction);
+    }
+
+    size_t Mark() const {
+        return code.size();
+    }
+
+    void Rewind(size_t mark) {
+        code.resize(mark);
     }
 
     void End() {
@@ -446,8 +490,13 @@ public:
     }
 
 private:
-    void Emit(u32 instruction) {
-        code.push_back(instruction);
+    void StoreDword(u32 destination_offset_dw) {
+        if (destination_offset_dw <= 0xfff) {
+            Emit(0xb9000023u | (destination_offset_dw << 10));
+        } else {
+            MoveImmediate(5, static_cast<u64>(destination_offset_dw) * sizeof(u32));
+            Emit(Arm64StoreDataRegisterOffset);
+        }
     }
 
     void MoveImmediate(u32 reg, u64 value) {
@@ -466,12 +515,50 @@ private:
 using namespace Shader;
 
 struct PassInfo {
-    using PtrUserList = boost::container::flat_map<u32, Shader::IR::Inst*>;
+    // Offsets are dword indices: immediates first in increasing order, then computed ones in
+    // program order.
+    struct OffsetCompare {
+        bool operator()(const IR::Value& a, const IR::Value& b) const {
+            if (a.IsImmediate() != b.IsImmediate()) {
+                return a.IsImmediate();
+            }
+            if (a.IsImmediate()) {
+                return a.U32() < b.U32();
+            }
+            const IR::Inst* a_inst = a.InstRecursive();
+            const IR::Inst* b_inst = b.InstRecursive();
+            if (a_inst == b_inst) {
+                return false;
+            }
+            const IR::Block* a_block = a_inst->GetParent();
+            const IR::Block* b_block = b_inst->GetParent();
+            if (a_block != b_block) {
+                return std::less<const IR::Block*>{}(a_block, b_block);
+            }
+            for (auto it = a_block->Instructions().iterator_to(*a_inst);
+                 it != a_block->Instructions().end(); ++it) {
+                if (&*it == b_inst) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    };
+
+    // A load the walker copies: one dword, or a whole descriptor read from a buffer.
+    struct Entry {
+        IR::Inst* use;
+        u32 num_dwords;
+    };
+
+    using PtrUserList = boost::container::flat_multimap<IR::Value, Entry, OffsetCompare>;
 
     Optimization::SrtGvnTable gvn_table;
     std::unordered_map<IR::Inst*, PtrUserList> pointer_uses;
     boost::container::small_flat_map<IR::ScalarReg, IR::Inst*, 1> srt_roots;
     std::unordered_map<u32, IR::Inst*> vn_to_inst;
+    // First flat buffer dword of each copied load.
+    std::unordered_map<const IR::Inst*, u32> slots;
     u32 dst_off_dw;
 
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
@@ -482,6 +569,21 @@ struct PassInfo {
     IR::Inst* DeduplicateInstruction(IR::Inst* inst) {
         auto it = vn_to_inst.try_emplace(gvn_table.GetValueNumber(inst), inst);
         return it.first->second;
+    }
+
+    std::optional<u32> FindSlot(IR::Inst* inst) {
+        const auto it = slots.find(DeduplicateInstruction(inst));
+        return it != slots.end() ? std::optional{it->second} : std::nullopt;
+    }
+
+    bool HasPending(IR::Inst* subtree) {
+        for (const auto& [offset, entry] : *GetUsesAsPointer(subtree)) {
+            if (!slots.contains(entry.use) ||
+                (GetUsesAsPointer(entry.use) != nullptr && HasPending(entry.use))) {
+                return true;
+            }
+        }
+        return false;
     }
 };
 
@@ -546,26 +648,174 @@ namespace Shader::Optimization {
 
 namespace {
 
-void VisitPointer(u32 offset_dw, IR::Inst* subtree, PassInfo& pass_info,
-                  Arm64SrtEmitter& emitter) {
-    emitter.PushPointer(offset_dw);
-    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
-    ASSERT(use_list);
+// Dynamic offsets are computed in w6..w15, one register per level of the expression.
+constexpr u32 FirstOffsetRegister = 6;
+constexpr u32 LastOffsetRegister = 15;
 
-    for (auto [source_offset_dw, use] : *use_list) {
-        emitter.CopyDword(source_offset_dw, pass_info.dst_off_dw);
-        if (use != nullptr) {
-            use->SetFlags<u32>(pass_info.dst_off_dw);
-        }
-        ++pass_info.dst_off_dw;
+// Emits the computation of a dword offset into w<reg> from user data, flat buffer values that the
+// walker copied earlier and scalar arithmetic. Fails on anything else, such as a lane value or a
+// loop counter.
+bool ComputeOffset(const IR::Value& value, u32 reg, PassInfo& pass_info, Arm64SrtEmitter& emitter) {
+    if (reg > LastOffsetRegister) {
+        return false;
     }
-
-    for (const auto [source_offset_dw, use] : *use_list) {
-        if (use != nullptr && pass_info.GetUsesAsPointer(use)) {
-            VisitPointer(source_offset_dw, use, pass_info, emitter);
+    if (value.IsImmediate()) {
+        emitter.MoveImmediate32(reg, value.U32());
+        return true;
+    }
+    IR::Inst* inst = value.InstRecursive();
+    const auto operands = [&] {
+        return ComputeOffset(inst->Arg(0), reg, pass_info, emitter) &&
+               ComputeOffset(inst->Arg(1), reg + 1, pass_info, emitter);
+    };
+    const auto binary = [&](u32 instruction) {
+        if (!operands()) {
+            return false;
         }
+        emitter.Emit(instruction | ((reg + 1) << 16) | (reg << 5) | reg);
+        return true;
+    };
+    const auto unsigned_select = [&](u32 condition) {
+        if (!operands()) {
+            return false;
+        }
+        emitter.Emit(0x6b00001fu | ((reg + 1) << 16) | (reg << 5)); // cmp
+        emitter.Emit(0x1a800000u | ((reg + 1) << 16) | (condition << 12) | (reg << 5) | reg);
+        return true;
+    };
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::GetUserData:
+        emitter.LoadFlatDword(reg, static_cast<u32>(inst->Arg(0).ScalarReg()));
+        return true;
+    case IR::Opcode::ReadConst:
+    case IR::Opcode::ReadConstBuffer:
+        if (const auto slot = pass_info.FindSlot(inst)) {
+            emitter.LoadFlatDword(reg, *slot);
+            return true;
+        }
+        return false;
+    case IR::Opcode::IAdd32:
+        return binary(0x0b000000u);
+    case IR::Opcode::ISub32:
+        return binary(0x4b000000u);
+    case IR::Opcode::IMul32:
+        return binary(0x1b007c00u);
+    case IR::Opcode::ShiftLeftLogical32:
+        return binary(0x1ac02000u);
+    case IR::Opcode::ShiftRightLogical32:
+        return binary(0x1ac02400u);
+    case IR::Opcode::BitwiseAnd32:
+        return binary(0x0a000000u);
+    case IR::Opcode::BitwiseOr32:
+        return binary(0x2a000000u);
+    case IR::Opcode::BitwiseXor32:
+        return binary(0x4a000000u);
+    case IR::Opcode::UMin32:
+        return unsigned_select(0x3); // lo
+    case IR::Opcode::UMax32:
+        return unsigned_select(0x8); // hi
+    case IR::Opcode::BitwiseNot32:
+        if (!ComputeOffset(inst->Arg(0), reg, pass_info, emitter)) {
+            return false;
+        }
+        emitter.Emit(0x2a2003e0u | (reg << 16) | reg); // mvn
+        return true;
+    case IR::Opcode::BitFieldUExtract: {
+        if (!operands()) {
+            return false;
+        }
+        emitter.Emit(0x1ac02400u | ((reg + 1) << 16) | (reg << 5) | reg); // lsr by the offset
+        const IR::Value count = inst->Arg(2);
+        if (count.IsImmediate()) {
+            if (count.U32() >= 32) {
+                return true;
+            }
+            emitter.MoveImmediate32(reg + 1, (1u << count.U32()) - 1);
+        } else {
+            if (reg + 2 > LastOffsetRegister ||
+                !ComputeOffset(count, reg + 1, pass_info, emitter)) {
+                return false;
+            }
+            emitter.MoveImmediate32(reg + 2, 1);
+            emitter.Emit(0x1ac02000u | ((reg + 1) << 16) | ((reg + 2) << 5) | (reg + 1));
+            emitter.Emit(0x51000400u | ((reg + 1) << 5) | (reg + 1)); // sub #1
+        }
+        emitter.Emit(0x0a000000u | ((reg + 1) << 16) | (reg << 5) | reg);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+// x4 = the byte offset of a dword offset.
+bool SetSourceOffset(const IR::Value& offset_dw, PassInfo& pass_info, Arm64SrtEmitter& emitter) {
+    if (offset_dw.IsImmediate()) {
+        emitter.SetSourceOffset(offset_dw.U32());
+        return true;
+    }
+    if (!ComputeOffset(offset_dw, FirstOffsetRegister, pass_info, emitter)) {
+        return false;
+    }
+    emitter.SetSourceOffsetFromRegister(FirstOffsetRegister);
+    return true;
+}
+
+bool CopyEntry(const IR::Value& offset_dw, const PassInfo::Entry& entry, PassInfo& pass_info,
+               Arm64SrtEmitter& emitter) {
+    if (offset_dw.IsImmediate()) {
+        for (u32 dword = 0; dword < entry.num_dwords; ++dword) {
+            emitter.CopyDword(offset_dw.U32() + dword, pass_info.dst_off_dw + dword);
+        }
+    } else {
+        if (!SetSourceOffset(offset_dw, pass_info, emitter)) {
+            return false;
+        }
+        emitter.CopyDwordsAtSourceOffset(entry.num_dwords, pass_info.dst_off_dw);
+    }
+    pass_info.slots[entry.use] = pass_info.dst_off_dw;
+    pass_info.dst_off_dw += entry.num_dwords;
+    return true;
+}
+
+// Copies the loads of one pointer level whose offsets can be computed at this point of the walker,
+// then descends. Code runs in emission order, so an offset only reads values copied before it.
+// Returns whether anything was copied; if not, the code emitted for this level is dropped.
+bool VisitPointer(const IR::Value& offset_dw, IR::Inst* subtree, PassInfo& pass_info,
+                  Arm64SrtEmitter& emitter) {
+    if (!pass_info.HasPending(subtree)) {
+        return false;
+    }
+    const size_t mark = emitter.Mark();
+    if (!SetSourceOffset(offset_dw, pass_info, emitter)) {
+        emitter.Rewind(mark);
+        return false;
+    }
+    emitter.PushPointer();
+    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
+    bool copied = false;
+    for (const auto& [source_offset_dw, entry] : *use_list) {
+        if (pass_info.slots.contains(entry.use)) {
+            continue;
+        }
+        const size_t entry_mark = emitter.Mark();
+        if (CopyEntry(source_offset_dw, entry, pass_info, emitter)) {
+            copied = true;
+        } else {
+            emitter.Rewind(entry_mark);
+        }
+    }
+    for (const auto& [source_offset_dw, entry] : *use_list) {
+        if (pass_info.GetUsesAsPointer(entry.use) != nullptr) {
+            copied |= VisitPointer(source_offset_dw, entry.use, pass_info, emitter);
+        }
+    }
+    if (!copied) {
+        emitter.Rewind(mark);
+        return false;
     }
     emitter.PopPointer();
+    return true;
 }
 
 void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
@@ -577,8 +827,17 @@ void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     emitter.Begin();
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
     ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
-    for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
-        VisitPointer(static_cast<u32>(sgpr_base), root, pass_info, emitter);
+    // The first sweep copies everything at immediate offsets; each further one copies what the
+    // values copied so far let it compute, for offsets that depend on loaded data.
+    constexpr int MaxSweeps = 4;
+    for (int sweep = 0; sweep < MaxSweeps; ++sweep) {
+        bool copied = false;
+        for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
+            copied |= VisitPointer(IR::Value(static_cast<u32>(sgpr_base)), root, pass_info, emitter);
+        }
+        if (!copied) {
+            break;
+        }
     }
     emitter.End();
 
@@ -586,6 +845,103 @@ void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     ASSERT(info.srt_info.walker_func != nullptr);
     info.srt_info.walker_func_size = emitter.Size();
     info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
+}
+
+bool IsPointerSource(const IR::Value& value) {
+    const IR::Inst* inst = value.TryInstRecursive();
+    return inst != nullptr && (inst->GetOpcode() == IR::Opcode::GetUserData ||
+                               inst->GetOpcode() == IR::Opcode::ReadConst ||
+                               inst->GetOpcode() == IR::Opcode::ReadConstBuffer);
+}
+
+// Folds a byte offset added to a pointer (low dword add, high dword add of its carry) into the
+// dword offset of the loads, so the pointer itself is what was loaded.
+void SimplifyReadConstAddressAdd(IR::Inst& inst) {
+    IR::Inst* addr = inst.Arg(0).InstRecursive();
+    IR::Inst* lo = addr->Arg(0).TryInstRecursive();
+    IR::Inst* hi = addr->Arg(1).TryInstRecursive();
+    if (lo == nullptr || hi == nullptr || lo->GetOpcode() != IR::Opcode::IAdd32 ||
+        hi->GetOpcode() != IR::Opcode::IAdd32) {
+        return;
+    }
+    IR::Value base = lo->Arg(0);
+    IR::Value add_offset = lo->Arg(1);
+    if (!IsPointerSource(base)) {
+        std::swap(base, add_offset);
+        if (!IsPointerSource(base)) {
+            return;
+        }
+    }
+    const IR::Inst* carry = hi->Arg(1).TryInstRecursive();
+    if (carry == nullptr || carry->GetOpcode() != IR::Opcode::SelectU32 ||
+        !carry->Arg(1).IsImmediate() || !carry->Arg(2).IsImmediate() ||
+        carry->Arg(1).U32() != 1 || carry->Arg(2).U32() != 0) {
+        return;
+    }
+    for (const auto& use : addr->Uses()) {
+        if (use.user->GetOpcode() != IR::Opcode::ReadConst || use.operand != 0) {
+            return;
+        }
+    }
+    addr->SetArg(0, base);
+    addr->SetArg(1, hi->Arg(0));
+    for (const auto& use : addr->Uses()) {
+        IR::Inst* user = use.user;
+        IR::IREmitter ir{*user->GetParent(), IR::Block::InstructionList::s_iterator_to(*user)};
+        const IR::U32 offset{user->Arg(1)};
+        if (offset.IsImmediate() && add_offset.IsImmediate()) {
+            user->SetArg(1, ir.Imm32(offset.U32() + (add_offset.U32() >> 2)));
+        } else {
+            const IR::U32 dword_offset =
+                add_offset.IsImmediate()
+                    ? ir.Imm32(add_offset.U32() >> 2)
+                    : IR::U32{ir.ShiftRightLogical(IR::U32{add_offset}, ir.Imm32(2u))};
+            user->SetArg(1, ir.IAdd(offset, dword_offset));
+        }
+    }
+}
+
+// Calls visit on each buffer load an offset is computed from.
+template <typename Visit>
+void ForEachOffsetLoad(const IR::Value& offset, Visit&& visit) {
+    std::vector<IR::Inst*> queue;
+    std::vector<IR::Inst*> visited;
+    if (!offset.IsImmediate()) {
+        queue.push_back(offset.InstRecursive());
+    }
+    while (!queue.empty()) {
+        IR::Inst* inst = queue.back();
+        queue.pop_back();
+        if (std::ranges::find(visited, inst) != visited.end()) {
+            continue;
+        }
+        visited.push_back(inst);
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::ReadConstBuffer:
+            visit(inst);
+            break;
+        case IR::Opcode::IAdd32:
+        case IR::Opcode::ISub32:
+        case IR::Opcode::IMul32:
+        case IR::Opcode::ShiftLeftLogical32:
+        case IR::Opcode::ShiftRightLogical32:
+        case IR::Opcode::BitwiseAnd32:
+        case IR::Opcode::BitwiseOr32:
+        case IR::Opcode::BitwiseXor32:
+        case IR::Opcode::BitwiseNot32:
+        case IR::Opcode::UMin32:
+        case IR::Opcode::UMax32:
+        case IR::Opcode::BitFieldUExtract:
+            for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+                if (!inst->Arg(arg).IsImmediate()) {
+                    queue.push_back(inst->Arg(arg).InstRecursive());
+                }
+            }
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 // Buffer loads that give the first dword of a resource descriptor (bindless: s_buffer_load of a T#,
@@ -643,13 +999,13 @@ std::vector<IR::Inst*> FindSharpBufferLoads(const IR::Program& program) {
 
 // A sharp read from a buffer becomes a flat user data read, like the s_load of a pointer table: the
 // walker takes the buffer base out of the V# (its first 48 bits) and copies the descriptor.
-void ReplaceSharpBufferLoad(IR::Inst* load) {
+void ReplaceSharpBufferLoad(IR::Inst* load, u32 slot) {
     IR::Inst* vsharp = load->Arg(0).InstRecursive();
     IR::IREmitter ir{*load->GetParent(), IR::Block::InstructionList::s_iterator_to(*load)};
     const IR::Value base = ir.CompositeConstruct(
         vsharp->Arg(0), ir.BitwiseAnd(IR::U32{vsharp->Arg(1)}, ir.Imm32(0xffffu)));
     const IR::U32 value = ir.ReadConst(base, IR::U32{load->Arg(1)});
-    value.Inst()->SetFlags<u32>(load->Flags<u32>());
+    value.Inst()->SetFlags<u32>(slot);
     load->ReplaceUsesWith(value);
 }
 
@@ -658,98 +1014,94 @@ void ReplaceSharpBufferLoad(IR::Inst* load) {
 void FlattenExtendedUserdataPass(IR::Program& program) {
     Shader::Info& info = program.info;
     PassInfo pass_info;
-    boost::container::small_vector<IR::Inst*, 32> all_readconsts;
 
-    for (auto r_it = program.post_order_blocks.rbegin(); r_it != program.post_order_blocks.rend();
-         ++r_it) {
-        IR::Block* block = *r_it;
+    // Every load the walker copies, with its size in dwords: each ReadConst, each sharp read from
+    // a buffer (up to eight dwords, read back from consecutive flat slots), and the buffer loads
+    // that a pointer or an offset is read from.
+    std::vector<std::pair<IR::Inst*, u32>> loads;
+    std::vector<IR::Inst*> readconsts;
+    for (IR::Block* block : program.blocks) {
         for (IR::Inst& inst : *block) {
-            if (inst.GetOpcode() != IR::Opcode::ReadConst) {
-                continue;
-            }
-            if (!inst.Arg(1).IsImmediate()) {
-                LOG_WARNING(Render_Recompiler, "ReadConst has non-immediate offset");
-                continue;
-            }
-
-            all_readconsts.push_back(&inst);
-            if (pass_info.DeduplicateInstruction(&inst) != &inst) {
-                continue;
-            }
-
-            IR::Inst* ptr_composite = inst.Arg(0).InstRecursive();
-            const auto pred = [](IR::Inst* candidate) -> std::optional<IR::Inst*> {
-                if (candidate->GetOpcode() == IR::Opcode::GetUserData ||
-                    candidate->GetOpcode() == IR::Opcode::ReadConst) {
-                    return candidate;
-                }
-                return std::nullopt;
-            };
-            auto base0 = IR::BreadthFirstSearch(ptr_composite->Arg(0), pred);
-            auto base1 = IR::BreadthFirstSearch(ptr_composite->Arg(1), pred);
-            ASSERT_MSG(base0 && base1, "ReadConst not from constant memory");
-
-            IR::Inst* ptr_lo = pass_info.DeduplicateInstruction(base0.value());
-            auto [uses, inserted] =
-                pass_info.pointer_uses.try_emplace(ptr_lo, PassInfo::PtrUserList{});
-            uses->second[inst.Arg(1).U32()] = &inst;
-            if (ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
-                pass_info.srt_roots[ptr_lo->Arg(0).ScalarReg()] = ptr_lo;
+            if (inst.GetOpcode() == IR::Opcode::ReadConst) {
+                SimplifyReadConstAddressAdd(inst);
+                readconsts.push_back(&inst);
+                loads.emplace_back(&inst, 1);
             }
         }
     }
+    const std::vector<IR::Inst*> sharp_loads = FindSharpBufferLoads(program);
+    std::vector<IR::Inst*> queued = sharp_loads;
+    for (IR::Inst* load : sharp_loads) {
+        loads.emplace_back(load, 8);
+    }
+    const auto queue_buffer_load = [&](IR::Inst* inst) {
+        if (inst->GetOpcode() == IR::Opcode::ReadConstBuffer &&
+            std::ranges::find(queued, inst) == queued.end()) {
+            queued.push_back(inst);
+            loads.emplace_back(inst, 1);
+        }
+    };
 
-    // Sharp buffer loads hang off the V# base like ReadConsts off a pointer. A descriptor is up to
-    // eight dwords and is read back from consecutive flat slots, so the dwords after its first
-    // are copied too even when the shader loads none of them.
-    std::vector<std::pair<IR::Inst*, IR::Inst*>> sharp_loads;
-    for (IR::Inst* load : FindSharpBufferLoads(program)) {
-        if (!load->Arg(1).IsImmediate()) {
+    const auto pred = [](IR::Inst* candidate) -> std::optional<IR::Inst*> {
+        if (candidate->GetOpcode() == IR::Opcode::GetUserData ||
+            candidate->GetOpcode() == IR::Opcode::ReadConst ||
+            candidate->GetOpcode() == IR::Opcode::ReadConstBuffer ||
+            candidate->GetOpcode() == IR::Opcode::ReadFirstLane) {
+            return candidate;
+        }
+        return std::nullopt;
+    };
+    for (size_t index = 0; index < loads.size(); ++index) {
+        const auto [load, num_dwords] = loads[index];
+        const IR::Inst* base = load->Arg(0).InstRecursive();
+        if (load->GetOpcode() == IR::Opcode::ReadConstBuffer &&
+            base->GetOpcode() != IR::Opcode::CompositeConstructU32x4) {
             continue;
         }
-        IR::Inst* vsharp = load->Arg(0).TryInstRecursive();
-        if (vsharp == nullptr || vsharp->GetOpcode() != IR::Opcode::CompositeConstructU32x4) {
+        const auto base0 = IR::BreadthFirstSearch(base->Arg(0), pred);
+        const auto base1 = IR::BreadthFirstSearch(base->Arg(1), pred);
+        // A pointer that differs per lane cannot be walked ahead of the draw.
+        if (!base0 || !base1 || (*base0)->GetOpcode() == IR::Opcode::ReadFirstLane ||
+            (*base1)->GetOpcode() == IR::Opcode::ReadFirstLane) {
+            LOG_WARNING(Render_Recompiler, "Load of {} is not from constant memory",
+                        IR::NameOf(load->GetOpcode()));
             continue;
         }
-        const auto pred = [](IR::Inst* candidate) -> std::optional<IR::Inst*> {
-            if (candidate->GetOpcode() == IR::Opcode::GetUserData ||
-                candidate->GetOpcode() == IR::Opcode::ReadConst) {
-                return candidate;
-            }
-            return std::nullopt;
-        };
-        auto base0 = IR::BreadthFirstSearch(vsharp->Arg(0), pred);
-        auto base1 = IR::BreadthFirstSearch(vsharp->Arg(1), pred);
-        if (!base0 || !base1) {
+        queue_buffer_load(*base0);
+        ForEachOffsetLoad(load->Arg(1), queue_buffer_load);
+        if (pass_info.DeduplicateInstruction(load) != load) {
             continue;
         }
-        IR::Inst* ptr_lo = pass_info.DeduplicateInstruction(base0.value());
-        auto& uses = pass_info.pointer_uses[ptr_lo];
-        const u32 index = load->Arg(1).U32();
-        auto [slot, inserted] = uses.try_emplace(index, load);
-        if (!inserted && slot->second == nullptr) {
-            slot->second = load;
-        }
-        sharp_loads.emplace_back(load, slot->second);
-        for (u32 dword = 1; dword < 8; ++dword) {
-            uses.try_emplace(index + dword, nullptr);
-        }
+        IR::Inst* ptr_lo = pass_info.DeduplicateInstruction(*base0);
+        pass_info.pointer_uses[ptr_lo].emplace(load->Arg(1), PassInfo::Entry{load, num_dwords});
         if (ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
             pass_info.srt_roots[ptr_lo->Arg(0).ScalarReg()] = ptr_lo;
         }
     }
 
     GenerateSrtProgram(info, pass_info);
-    for (IR::Inst* readconst : all_readconsts) {
-        ASSERT(pass_info.vn_to_inst.contains(pass_info.gvn_table.GetValueNumber(readconst)));
-        IR::Inst* original = pass_info.DeduplicateInstruction(readconst);
-        readconst->SetFlags<u32>(original->Flags<u32>());
+
+    size_t unreachable = 0;
+    for (IR::Inst* readconst : readconsts) {
+        if (const auto slot = pass_info.FindSlot(readconst)) {
+            readconst->SetFlags<u32>(*slot);
+        } else {
+            ++unreachable;
+        }
     }
-    for (const auto& [load, original] : sharp_loads) {
-        load->SetFlags<u32>(original->Flags<u32>());
+    if (unreachable != 0) {
+        LOG_WARNING(Render_Recompiler, "SRT walker cannot compute the offset of {} ReadConst",
+                    unreachable);
     }
-    for (const auto& [load, original] : sharp_loads) {
-        ReplaceSharpBufferLoad(load);
+    // A sharp the walker cannot reach stays a buffer load, and the resource pass binds a null
+    // resource for it.
+    for (IR::Inst* load : sharp_loads) {
+        if (const auto slot = pass_info.FindSlot(load)) {
+            ReplaceSharpBufferLoad(load, *slot);
+        } else {
+            LOG_WARNING(Render_Recompiler, "SRT walker cannot reach the sharp loaded at pc={:#x}",
+                        load->Flags<IR::BufferInstInfo>().pc.Value());
+        }
     }
     info.RefreshFlatBuf();
 }
