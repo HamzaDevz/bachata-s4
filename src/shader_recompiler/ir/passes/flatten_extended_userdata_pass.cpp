@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -459,6 +460,19 @@ public:
         }
     }
 
+    // Writes a buffer descriptor over the memory at the pointer in x2: base address, no stride,
+    // num_records bytes.
+    void WritePointerWindow(u32 destination_offset_dw, u32 num_records) {
+        Emit(0x2a0203e3u); // mov w3, w2
+        StoreDword(destination_offset_dw);
+        Emit(0xd360fc43u); // lsr x3, x2, #32
+        StoreDword(destination_offset_dw + 1);
+        MoveImmediate32(3, num_records);
+        StoreDword(destination_offset_dw + 2);
+        MoveImmediate32(3, 0);
+        StoreDword(destination_offset_dw + 3);
+    }
+
     void MoveImmediate32(u32 reg, u32 value) {
         Emit(0x52800000u | reg | ((value & 0xffff) << 5));
         if ((value >> 16) != 0) {
@@ -560,6 +574,10 @@ struct PassInfo {
     std::unordered_map<u32, IR::Inst*> vn_to_inst;
     // First flat buffer dword of each copied load.
     std::unordered_map<const IR::Inst*, u32> slots;
+    // Pointer of each ReadConst that reads straight from it, and the flat buffer dword of the
+    // descriptor the walker writes over a pointer whose loads it cannot all copy.
+    std::unordered_map<const IR::Inst*, IR::Inst*> window_pointers;
+    std::unordered_map<const IR::Inst*, u32> windows;
     u32 dst_off_dw;
 
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
@@ -575,6 +593,15 @@ struct PassInfo {
     std::optional<u32> FindSlot(IR::Inst* inst) {
         const auto it = slots.find(DeduplicateInstruction(inst));
         return it != slots.end() ? std::optional{it->second} : std::nullopt;
+    }
+
+    std::optional<u32> FindWindow(const IR::Inst* inst) const {
+        const auto pointer = window_pointers.find(inst);
+        if (pointer == window_pointers.end()) {
+            return std::nullopt;
+        }
+        const auto it = windows.find(pointer->second);
+        return it != windows.end() ? std::optional{it->second} : std::nullopt;
     }
 
     bool HasPending(IR::Inst* subtree) {
@@ -652,6 +679,9 @@ namespace {
 // Dynamic offsets are computed in w6..w15, one register per level of the expression.
 constexpr u32 FirstOffsetRegister = 6;
 constexpr u32 LastOffsetRegister = 15;
+
+// Bytes a pointer window covers, clamped at bind time to the mapped memory it starts in.
+constexpr u32 PointerWindowBytes = 256 * 1024;
 
 // Emits the computation of a dword offset into w<reg> from user data, flat buffer values that the
 // walker copied earlier and scalar arithmetic. Fails on anything else, such as a lane value or a
@@ -781,9 +811,10 @@ bool CopyEntry(const IR::Value& offset_dw, const PassInfo::Entry& entry, PassInf
 
 // Copies the loads of one pointer level whose offsets can be computed at this point of the walker,
 // then descends. Code runs in emission order, so an offset only reads values copied before it.
-// Returns whether anything was copied; if not, the code emitted for this level is dropped.
+// With add_windows, a level left with loads it cannot copy also gets a buffer descriptor over its
+// pointer. Returns whether anything was written; if not, the code emitted for this level is dropped.
 bool VisitPointer(const IR::Value& offset_dw, IR::Inst* subtree, PassInfo& pass_info,
-                  Arm64SrtEmitter& emitter) {
+                  Arm64SrtEmitter& emitter, bool add_windows) {
     if (!pass_info.HasPending(subtree)) {
         return false;
     }
@@ -806,9 +837,20 @@ bool VisitPointer(const IR::Value& offset_dw, IR::Inst* subtree, PassInfo& pass_
             emitter.Rewind(entry_mark);
         }
     }
+    const auto needs_window = [&](const auto& use) {
+        return !pass_info.slots.contains(use.second.use) &&
+               pass_info.window_pointers.contains(use.second.use);
+    };
+    if (add_windows && !pass_info.windows.contains(subtree) &&
+        std::ranges::any_of(*use_list, needs_window)) {
+        emitter.WritePointerWindow(pass_info.dst_off_dw, PointerWindowBytes);
+        pass_info.windows[subtree] = pass_info.dst_off_dw;
+        pass_info.dst_off_dw += 4;
+        copied = true;
+    }
     for (const auto& [source_offset_dw, entry] : *use_list) {
         if (pass_info.GetUsesAsPointer(entry.use) != nullptr) {
-            copied |= VisitPointer(source_offset_dw, entry.use, pass_info, emitter);
+            copied |= VisitPointer(source_offset_dw, entry.use, pass_info, emitter, add_windows);
         }
     }
     if (!copied) {
@@ -830,16 +872,20 @@ void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
     // The first sweep copies everything at immediate offsets; each further one copies what the
     // values copied so far let it compute, for offsets that depend on loaded data.
-    constexpr int MaxSweeps = 4;
-    for (int sweep = 0; sweep < MaxSweeps; ++sweep) {
+    // A last one gives the pointers whose loads still could not be copied a descriptor, so the
+    // shader reads them from memory.
+    const auto sweep = [&](bool add_windows) {
         bool copied = false;
         for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
-            copied |= VisitPointer(IR::Value(static_cast<u32>(sgpr_base)), root, pass_info, emitter);
+            copied |= VisitPointer(IR::Value(static_cast<u32>(sgpr_base)), root, pass_info, emitter,
+                                   add_windows);
         }
-        if (!copied) {
-            break;
-        }
+        return copied;
+    };
+    constexpr int MaxSweeps = 4;
+    for (int count = 0; count < MaxSweeps && sweep(false); ++count) {
     }
+    sweep(true);
     emitter.End();
 
     info.srt_info.walker_func = RegisterWalkerCode(emitter.Data(), emitter.Size());
@@ -1010,6 +1056,23 @@ void ReplaceSharpBufferLoad(IR::Inst* load, u32 slot) {
     load->ReplaceUsesWith(value);
 }
 
+// A load at an offset only the GPU knows (a lane value made uniform, a loop counter, shared memory)
+// reads the memory its pointer points to through the descriptor the walker writes over it.
+void ReplaceWithWindowLoad(IR::Inst* load, u32 slot) {
+    IR::IREmitter ir{*load->GetParent(), IR::Block::InstructionList::s_iterator_to(*load)};
+    std::array<IR::U32, 4> vsharp;
+    for (u32 dword = 0; dword < 4; ++dword) {
+        vsharp[dword] = ir.ReadConst(load->Arg(0), ir.Imm32(0u));
+        vsharp[dword].Inst()->SetFlags<u32>(slot + dword);
+    }
+    IR::BufferInstInfo buffer_info{};
+    buffer_info.pointer_window.Assign(1);
+    const IR::U32 value =
+        ir.ReadConstBuffer(ir.CompositeConstruct(vsharp[0], vsharp[1], vsharp[2], vsharp[3]),
+                           IR::U32{load->Arg(1)}, buffer_info);
+    load->ReplaceUsesWith(value);
+}
+
 // Text form of an offset or pointer for the log, a star marking a load the walker did not copy.
 std::string DescribeValue(const IR::Value& value, const PassInfo& pass_info, int depth = 0) {
     if (value.IsImmediate()) {
@@ -1152,10 +1215,13 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         }
         queue_buffer_load(*base0);
         ForEachOffsetLoad(load->Arg(1), queue_buffer_load);
+        IR::Inst* ptr_lo = pass_info.DeduplicateInstruction(*base0);
+        if (load->GetOpcode() == IR::Opcode::ReadConst && base->Arg(0).TryInstRecursive() == *base0) {
+            pass_info.window_pointers[load] = ptr_lo;
+        }
         if (pass_info.DeduplicateInstruction(load) != load) {
             continue;
         }
-        IR::Inst* ptr_lo = pass_info.DeduplicateInstruction(*base0);
         pass_info.pointer_uses[ptr_lo].emplace(load->Arg(1), PassInfo::Entry{load, num_dwords});
         if (ptr_lo->GetOpcode() == IR::Opcode::GetUserData) {
             pass_info.srt_roots[ptr_lo->Arg(0).ScalarReg()] = ptr_lo;
@@ -1174,6 +1240,8 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
     for (IR::Inst* readconst : readconsts) {
         if (const auto slot = pass_info.FindSlot(readconst)) {
             readconst->SetFlags<u32>(*slot);
+        } else if (const auto window = pass_info.FindWindow(readconst)) {
+            ReplaceWithWindowLoad(readconst, *window);
         } else {
             report(readconst);
         }

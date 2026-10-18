@@ -263,6 +263,7 @@ public:
         buffer.is_written |= desc.is_written;
         buffer.is_formatted |= desc.is_formatted;
         buffer.used_as_readconst |= desc.used_as_readconst;
+        buffer.is_pointer_window |= desc.is_pointer_window;
         return index;
     }
 
@@ -554,6 +555,7 @@ void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors&
             .is_formatted = inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32 ||
                             inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32,
             .used_as_readconst = inst.GetOpcode() == IR::Opcode::ReadConstBuffer,
+            .is_pointer_window = inst_info.pointer_window != 0,
         });
     }
 

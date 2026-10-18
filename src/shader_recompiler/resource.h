@@ -38,6 +38,9 @@ struct BufferResource {
     bool is_written{};
     bool is_formatted{};
     bool used_as_readconst{};
+    // Synthesized over a pointer for loads at offsets only the GPU knows: bound up to the end of
+    // the mapped memory it starts in.
+    bool is_pointer_window{};
 
     bool IsSpecial() const noexcept {
         return buffer_type != BufferType::Guest;

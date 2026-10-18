@@ -595,8 +595,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     for (const auto& desc : stage.buffers) {
         const auto vsharp = desc.GetSharp(stage);
         if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
-            const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
-            const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
+            const u64 size =
+                desc.is_pointer_window
+                    ? memory->ClampToMappedRange(vsharp.base_address, vsharp.GetSize())
+                    : memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+            const auto buffer_id = size > 0 ? buffer_cache.FindBuffer(vsharp.base_address, size)
+                                            : VideoCore::BufferId{};
             buffer_bindings.emplace_back(buffer_id, vsharp, size);
         } else {
             buffer_bindings.emplace_back(VideoCore::BufferId{}, vsharp, 0);

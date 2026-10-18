@@ -235,6 +235,10 @@ public:
 
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
 
+    /// Bytes of [virtual_addr, virtual_addr + size) that lie in contiguous accessible mappings,
+    /// zero when virtual_addr itself is not mapped.
+    u64 ClampToMappedRange(VAddr virtual_addr, u64 size);
+
     void SetPrtArea(u32 id, VAddr address, u64 size);
 
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
