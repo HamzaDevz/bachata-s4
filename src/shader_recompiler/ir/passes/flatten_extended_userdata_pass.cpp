@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 #include <boost/container/flat_map.hpp>
@@ -1009,6 +1010,30 @@ void ReplaceSharpBufferLoad(IR::Inst* load, u32 slot) {
     load->ReplaceUsesWith(value);
 }
 
+// Text form of an offset or pointer for the log, a star marking a load the walker did not copy.
+std::string DescribeValue(const IR::Value& value, const PassInfo& pass_info, int depth = 0) {
+    if (value.IsImmediate()) {
+        return fmt::format("{:#x}", value.U32());
+    }
+    const IR::Inst* inst = value.InstRecursive();
+    const IR::Opcode opcode = inst->GetOpcode();
+    if (opcode == IR::Opcode::GetUserData) {
+        return fmt::format("ud{}", static_cast<u32>(inst->Arg(0).ScalarReg()));
+    }
+    if (depth >= 4) {
+        return fmt::format("{}(..)", IR::NameOf(opcode));
+    }
+    if (opcode == IR::Opcode::ReadConst || opcode == IR::Opcode::ReadConstBuffer) {
+        return fmt::format("{}{}[{}]", IR::NameOf(opcode), pass_info.slots.contains(inst) ? "" : "*",
+                           DescribeValue(inst->Arg(1), pass_info, depth + 1));
+    }
+    std::string text = fmt::format("{}(", IR::NameOf(opcode));
+    for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+        text += (arg != 0 ? ", " : "") + DescribeValue(inst->Arg(arg), pass_info, depth + 1);
+    }
+    return text + ")";
+}
+
 } // namespace
 
 void FlattenExtendedUserdataPass(IR::Program& program) {
@@ -1081,17 +1106,18 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
 
     GenerateSrtProgram(info, pass_info);
 
-    size_t unreachable = 0;
+    const auto report = [&](const IR::Inst* load) {
+        const IR::Inst* base = load->Arg(0).InstRecursive();
+        LOG_WARNING(Render_Recompiler, "SRT walker cannot copy {} from {}",
+                    DescribeValue(IR::Value{const_cast<IR::Inst*>(load)}, pass_info),
+                    DescribeValue(base->Arg(0), pass_info));
+    };
     for (IR::Inst* readconst : readconsts) {
         if (const auto slot = pass_info.FindSlot(readconst)) {
             readconst->SetFlags<u32>(*slot);
         } else {
-            ++unreachable;
+            report(readconst);
         }
-    }
-    if (unreachable != 0) {
-        LOG_WARNING(Render_Recompiler, "SRT walker cannot compute the offset of {} ReadConst",
-                    unreachable);
     }
     // A sharp the walker cannot reach stays a buffer load, and the resource pass binds a null
     // resource for it.
@@ -1099,8 +1125,7 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
         if (const auto slot = pass_info.FindSlot(load)) {
             ReplaceSharpBufferLoad(load, *slot);
         } else {
-            LOG_WARNING(Render_Recompiler, "SRT walker cannot reach the sharp loaded at pc={:#x}",
-                        load->Flags<IR::BufferInstInfo>().pc.Value());
+            report(load);
         }
     }
     info.RefreshFlatBuf();
