@@ -368,13 +368,77 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
     case Opcode::V_CMPX_TRU_U32:
         return V_CMP_U32(ConditionOp::TRU, false, true, inst);
 
+        //     V_CMP_{OP8}_I64
+    case Opcode::V_CMP_F_I64:
+        return V_CMP_U64(ConditionOp::F, true, false, inst);
+    case Opcode::V_CMP_LT_I64:
+        return V_CMP_U64(ConditionOp::LT, true, false, inst);
+    case Opcode::V_CMP_EQ_I64:
+        return V_CMP_U64(ConditionOp::EQ, true, false, inst);
+    case Opcode::V_CMP_LE_I64:
+        return V_CMP_U64(ConditionOp::LE, true, false, inst);
+    case Opcode::V_CMP_GT_I64:
+        return V_CMP_U64(ConditionOp::GT, true, false, inst);
+    case Opcode::V_CMP_NE_I64:
+        return V_CMP_U64(ConditionOp::LG, true, false, inst);
+    case Opcode::V_CMP_GE_I64:
+        return V_CMP_U64(ConditionOp::GE, true, false, inst);
+    case Opcode::V_CMP_TRU_I64:
+        return V_CMP_U64(ConditionOp::TRU, true, false, inst);
+
         //     V_CMP_{OP8}_U64
+    case Opcode::V_CMP_F_U64:
+        return V_CMP_U64(ConditionOp::F, false, false, inst);
+    case Opcode::V_CMP_LT_U64:
+        return V_CMP_U64(ConditionOp::LT, false, false, inst);
     case Opcode::V_CMP_EQ_U64:
         return V_CMP_U64(ConditionOp::EQ, false, false, inst);
-    case Opcode::V_CMP_NE_U64:
-        return V_CMP_U64(ConditionOp::LG, false, false, inst);
+    case Opcode::V_CMP_LE_U64:
+        return V_CMP_U64(ConditionOp::LE, false, false, inst);
     case Opcode::V_CMP_GT_U64:
         return V_CMP_U64(ConditionOp::GT, false, false, inst);
+    case Opcode::V_CMP_NE_U64:
+        return V_CMP_U64(ConditionOp::LG, false, false, inst);
+    case Opcode::V_CMP_GE_U64:
+        return V_CMP_U64(ConditionOp::GE, false, false, inst);
+    case Opcode::V_CMP_TRU_U64:
+        return V_CMP_U64(ConditionOp::TRU, false, false, inst);
+
+        //     V_CMPX_{OP8}_I64
+    case Opcode::V_CMPX_F_I64:
+        return V_CMP_U64(ConditionOp::F, true, true, inst);
+    case Opcode::V_CMPX_LT_I64:
+        return V_CMP_U64(ConditionOp::LT, true, true, inst);
+    case Opcode::V_CMPX_EQ_I64:
+        return V_CMP_U64(ConditionOp::EQ, true, true, inst);
+    case Opcode::V_CMPX_LE_I64:
+        return V_CMP_U64(ConditionOp::LE, true, true, inst);
+    case Opcode::V_CMPX_GT_I64:
+        return V_CMP_U64(ConditionOp::GT, true, true, inst);
+    case Opcode::V_CMPX_NE_I64:
+        return V_CMP_U64(ConditionOp::LG, true, true, inst);
+    case Opcode::V_CMPX_GE_I64:
+        return V_CMP_U64(ConditionOp::GE, true, true, inst);
+    case Opcode::V_CMPX_TRU_I64:
+        return V_CMP_U64(ConditionOp::TRU, true, true, inst);
+
+        //     V_CMPX_{OP8}_U64
+    case Opcode::V_CMPX_F_U64:
+        return V_CMP_U64(ConditionOp::F, false, true, inst);
+    case Opcode::V_CMPX_LT_U64:
+        return V_CMP_U64(ConditionOp::LT, false, true, inst);
+    case Opcode::V_CMPX_EQ_U64:
+        return V_CMP_U64(ConditionOp::EQ, false, true, inst);
+    case Opcode::V_CMPX_LE_U64:
+        return V_CMP_U64(ConditionOp::LE, false, true, inst);
+    case Opcode::V_CMPX_GT_U64:
+        return V_CMP_U64(ConditionOp::GT, false, true, inst);
+    case Opcode::V_CMPX_NE_U64:
+        return V_CMP_U64(ConditionOp::LG, false, true, inst);
+    case Opcode::V_CMPX_GE_U64:
+        return V_CMP_U64(ConditionOp::GE, false, true, inst);
+    case Opcode::V_CMPX_TRU_U64:
+        return V_CMP_U64(ConditionOp::TRU, false, true, inst);
 
     case Opcode::V_CMP_CLASS_F32:
         return V_CMP_CLASS_F32(inst);
@@ -1252,43 +1316,59 @@ void Translator::V_CMP_U32(ConditionOp op, bool is_signed, bool set_exec, const 
 }
 
 void Translator::V_CMP_U64(ConditionOp op, bool is_signed, bool set_exec, const GcnInst& inst) {
-    const bool is_zero = inst.src[1].field == OperandField::ConstZero;
-    const bool is_neg_one = inst.src[1].field == OperandField::SignedConstIntNeg;
-    ASSERT(is_zero || is_neg_one);
-    if (is_neg_one) {
-        ASSERT_MSG(-s32(inst.src[1].code) + SignedConstIntNegMin - 1 == -1,
-                   "SignedConstIntNeg must be -1");
-    }
-
-    const IR::U1 src0 = [&] {
-        switch (inst.src[0].field) {
-        case OperandField::ScalarGPR:
-            return ir.GetThreadBitScalarReg(IR::ScalarReg(inst.src[0].code));
-        case OperandField::VccLo:
-            return ir.GetVcc();
-        default:
-            UNREACHABLE_MSG("src0 = {}", u32(inst.src[0].field));
-        }
-    }();
+    // A lane mask in SGPRs or VCC compared with 0 or -1 has no per-lane 64-bit value: it reads as
+    // the lane's own thread bit. Any other operands are a plain per-lane 64-bit compare.
+    const auto is_mask_const = [](const InstOperand& operand) {
+        return operand.field == OperandField::ConstZero ||
+               (operand.field == OperandField::SignedConstIntNeg &&
+                -s32(operand.code) + SignedConstIntNegMin - 1 == -1);
+    };
+    const bool is_mask_cmp =
+        !is_signed &&
+        (inst.src[0].field == OperandField::ScalarGPR ||
+         inst.src[0].field == OperandField::VccLo) &&
+        is_mask_const(inst.src[1]) &&
+        (op == ConditionOp::EQ || op == ConditionOp::LG || op == ConditionOp::GT);
     const IR::U1 result = [&] {
+        if (is_mask_cmp) {
+            const bool is_zero = inst.src[1].field == OperandField::ConstZero;
+            const IR::U1 src0 = inst.src[0].field == OperandField::VccLo
+                                    ? ir.GetVcc()
+                                    : ir.GetThreadBitScalarReg(IR::ScalarReg(inst.src[0].code));
+            switch (op) {
+            case ConditionOp::EQ:
+                return is_zero ? ir.LogicalNot(src0) : src0;
+            case ConditionOp::LG: // NE
+                return is_zero ? src0 : ir.LogicalNot(src0);
+            default: // GT: no unsigned value is above -1
+                return is_zero ? ir.GroupAny(src0) : ir.Imm1(false);
+            }
+        }
+        const IR::U64 src0{GetSrc64<IR::U64>(inst.src[0])};
+        const IR::U64 src1{GetSrc64<IR::U64>(inst.src[1])};
         switch (op) {
+        case ConditionOp::F:
+            return ir.Imm1(false);
+        case ConditionOp::TRU:
+            return ir.Imm1(true);
         case ConditionOp::EQ:
-            return is_zero ? ir.LogicalNot(src0) : src0;
-        case ConditionOp::LG: // NE
-            return is_zero ? src0 : ir.LogicalNot(src0);
+            return ir.IEqual(src0, src1);
+        case ConditionOp::LG:
+            return ir.INotEqual(src0, src1);
         case ConditionOp::GT:
-            ASSERT(is_zero);
-            return ir.GroupAny(ir.GetThreadBitScalarReg(IR::ScalarReg(inst.src[0].code)));
+            return ir.IGreaterThan(src0, src1, is_signed);
+        case ConditionOp::LT:
+            return ir.ILessThan(src0, src1, is_signed);
+        case ConditionOp::LE:
+            return ir.ILessThanEqual(src0, src1, is_signed);
+        case ConditionOp::GE:
+            return ir.IGreaterThanEqual(src0, src1, is_signed);
         default:
-            UNREACHABLE_MSG("Unsupported V_CMP_U64 condition operation: {}", u32(op));
+            UNREACHABLE();
         }
     }();
-
-    if (is_signed) {
-        UNREACHABLE_MSG("V_CMP_U64 with signed integers is not supported");
-    }
     if (set_exec) {
-        UNREACHABLE_MSG("Exec setting for V_CMP_U64 is not supported");
+        ir.SetExec(result);
     }
     SetDst1(inst.dst[1], result);
 }
