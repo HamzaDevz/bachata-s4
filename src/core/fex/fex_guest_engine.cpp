@@ -1002,13 +1002,27 @@ bool DeliverGuestOrbisSignal(int orbis_sig, siginfo_t* info, void* rawContext,
 
 bool HandleGuestSignal(int signal, siginfo_t* info, void* rawContext) noexcept {
 #if defined(__aarch64__)
-  if (signal != SIGBUS || info == nullptr || rawContext == nullptr ||
-      ActiveFexExecution.Context == nullptr || ActiveFexExecution.Thread == nullptr ||
-      ActiveFexExecution.SignalDelegator == nullptr) {
+  if (info == nullptr || rawContext == nullptr || ActiveFexExecution.Context == nullptr ||
+      ActiveFexExecution.Thread == nullptr || ActiveFexExecution.SignalDelegator == nullptr) {
     return false;
   }
 
   auto* context = reinterpret_cast<ucontext_t*>(rawContext);
+  if (signal == SIGSEGV) {
+    // Guest code that leaves calls without returning (fibers, longjmp) walks the call-ret
+    // prediction stack into its guard pages. It is only a cache, so reset it as FEX does.
+    const auto base = reinterpret_cast<std::uintptr_t>(ActiveFexExecution.Thread->CallRetStackBase);
+    const auto address = reinterpret_cast<std::uintptr_t>(info->si_addr);
+    constexpr auto size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+    if (base == 0 || address < base - kRequiredPageSize || address >= base + size + kRequiredPageSize) {
+      return false;
+    }
+    context->uc_mcontext.regs[25] = base + size / 4;
+    return true;
+  }
+  if (signal != SIGBUS) {
+    return false;
+  }
   const auto pc = static_cast<std::uintptr_t>(context->uc_mcontext.pc);
   if (!ActiveFexExecution.Context->IsAddressInCodeBuffer(ActiveFexExecution.Thread, pc)) {
     return false;

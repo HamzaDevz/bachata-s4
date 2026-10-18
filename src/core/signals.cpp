@@ -110,7 +110,7 @@ void SignalHandler(int sig, siginfo_t* info, void* raw_context) {
     case SIGBUS:
     case SIGSEGV: {
 #ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
-        if (sig == SIGBUS && ::Core::Fex::HandleGuestSignal(sig, info, raw_context)) {
+        if (::Core::Fex::HandleGuestSignal(sig, info, raw_context)) {
             return;
         }
 #endif
