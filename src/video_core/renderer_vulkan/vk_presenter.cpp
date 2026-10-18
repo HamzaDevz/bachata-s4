@@ -1167,7 +1167,10 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame) {
 
     // Present to swapchain.
     {
-        std::scoped_lock submit_lock{Scheduler::submit_mutex};
+        std::unique_lock submit_lock{Scheduler::submit_mutex, std::defer_lock};
+        if (!swapchain.IsHostPresent()) {
+            submit_lock.lock();
+        }
         const bool presented = swapchain.Present();
         if (trace) {
             LOG_INFO(Render_Vulkan, "BACHATA_PRESENT_TRACE id={} stage=present_done ok={}", trace_id,

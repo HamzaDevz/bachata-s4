@@ -464,6 +464,11 @@ public:
         return supports_memory_budget;
     }
 
+    /// Returns whether device memory can be exported as a dma-buf.
+    bool IsDmaBufExportSupported() const {
+        return external_memory_dma_buf;
+    }
+
     /// Returns the amount of memory used.
     [[nodiscard]] u64 GetDeviceMemoryUsage() const;
 
@@ -549,6 +554,7 @@ private:
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
     bool supports_memory_budget{};
+    bool external_memory_dma_buf{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;

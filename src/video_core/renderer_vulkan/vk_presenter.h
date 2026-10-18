@@ -68,6 +68,10 @@ public:
         return *rasterizer.get();
     }
 
+    const Instance& GetInstance() const {
+        return instance;
+    }
+
     bool IsHDRSupported() const {
         return swapchain.HasHDR();
     }

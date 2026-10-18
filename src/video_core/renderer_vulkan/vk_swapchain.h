@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <vector>
 #include "common/types.h"
@@ -74,8 +75,9 @@ public:
         return extent;
     }
 
+    /// Null when presenting on the host: the image is free as soon as the previous copy is done.
     [[nodiscard]] vk::Semaphore GetImageAcquiredSemaphore() const {
-        return image_acquired[frame_index];
+        return host_present ? vk::Semaphore{} : image_acquired[frame_index];
     }
 
     [[nodiscard]] vk::Semaphore GetPresentReadySemaphore() const {
@@ -90,6 +92,12 @@ public:
 
     bool GetHDR() const {
         return needs_hdr;
+    }
+
+    /// Returns true when frames go straight to the X server instead of a Vulkan swapchain.
+    /// Present() then takes the submit lock itself, only around its queue submission.
+    bool IsHostPresent() const {
+        return host_present != nullptr;
     }
 
 private:
@@ -110,6 +118,26 @@ private:
 
     /// Creates the image acquired and present ready semaphores
     void RefreshSemaphores();
+
+    struct HostPresent;
+
+    /// Connects to the X server for host presentation when the platform allows it
+    void InitHostPresent();
+
+    /// Creates the images, their dma-buf readback buffers and the matching X pixmaps
+    bool CreateHostImages();
+
+    /// Destroys the host presentation images and pixmaps
+    void DestroyHostImages();
+
+    /// Falls back from host presentation to the Vulkan swapchain
+    void DisableHostPresent();
+
+    /// Picks the next host image once its previous frame has reached the window
+    void AcquireHostImage();
+
+    /// Copies the current image to its pixmap and shows it in the window
+    bool PresentHost();
 
 private:
     const Instance& instance;
@@ -134,6 +162,7 @@ private:
     bool needs_recreation = true;
     bool needs_hdr = false;    // The game requested HDR swapchain
     bool supports_hdr = false; // SC supports HDR output
+    std::unique_ptr<HostPresent> host_present;
 };
 
 } // namespace Vulkan

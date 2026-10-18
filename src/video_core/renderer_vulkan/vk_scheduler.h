@@ -62,6 +62,9 @@ struct SubmitInfo {
     u32 num_signal_semas;
 
     void AddWait(vk::Semaphore semaphore, u64 tick = 1) {
+        if (!semaphore) {
+            return;
+        }
         wait_semas[num_wait_semas] = semaphore;
         wait_ticks[num_wait_semas++] = tick;
     }
