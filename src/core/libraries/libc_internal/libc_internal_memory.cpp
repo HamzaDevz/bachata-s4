@@ -6,16 +6,28 @@
 #include "common/assert.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/libs.h"
+#include "core/memory.h"
 #include "libc_internal_memory.h"
 #include "mspace.h"
 
 namespace Libraries::LibcInternal {
 
+// A host write into GPU-tracked guest memory faults once per protected 4 KB page, and each fault
+// is a signal round trip plus an mprotect. Games fill their dynamic GPU buffers through these
+// calls every frame, so unprotect the whole destination with a single invalidation up front.
+static void InvalidateGuestWrite(void* dest, size_t n) {
+    if (n >= 4_KB) {
+        Core::Memory::Instance()->InvalidateMemory(reinterpret_cast<VAddr>(dest), n);
+    }
+}
+
 void* PS4_SYSV_ABI internal_memset(void* s, int c, size_t n) {
+    InvalidateGuestWrite(s, n);
     return std::memset(s, c, n);
 }
 
 void* PS4_SYSV_ABI internal_memcpy(void* dest, const void* src, size_t n) {
+    InvalidateGuestWrite(dest, n);
     return std::memcpy(dest, src, n);
 }
 
@@ -23,6 +35,7 @@ s32 PS4_SYSV_ABI internal_memcpy_s(void* dest, size_t destsz, const void* src, s
 #ifdef _WIN64
     return memcpy_s(dest, destsz, src, count);
 #else
+    InvalidateGuestWrite(dest, count);
     std::memcpy(dest, src, count);
     return 0; // ALL OK
 #endif

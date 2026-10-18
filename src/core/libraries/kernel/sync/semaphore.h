@@ -19,12 +19,58 @@
 #endif
 
 #ifdef SHADPS4_ENABLE_FEX_GUEST_CPU
+#include <condition_variable>
+#include <mutex>
+
 namespace Core::Fex {
 void FlushPendingGuestOrbisSignal() noexcept;
 } // namespace Core::Fex
 #endif
 
 namespace Libraries::Kernel {
+
+#if defined(SHADPS4_ENABLE_FEX_GUEST_CPU) && !defined(_WIN64) && !defined(__APPLE__)
+// Guest waits below are always timed so pending guest signals get flushed. libstdc++ only
+// blocks a timed semaphore wait after spinning on sched_yield and sleeping half the time already
+// waited, so every waiting guest thread kept a core busy and woke up late. A condition variable
+// blocks in the kernel at once and wakes on release.
+template <s64 max>
+class BlockingSemaphore {
+public:
+    explicit BlockingSemaphore(s64 initial) : count{initial} {}
+
+    void release() {
+        // Notify under the lock: the waiter may destroy this object as soon as it returns.
+        std::scoped_lock lk{mutex};
+        ++count;
+        cv.notify_one();
+    }
+
+    bool try_acquire() {
+        std::scoped_lock lk{mutex};
+        if (count == 0) {
+            return false;
+        }
+        --count;
+        return true;
+    }
+
+    template <class Rep, class Period>
+    bool try_acquire_for(const std::chrono::duration<Rep, Period>& rel_time) {
+        std::unique_lock lk{mutex};
+        if (!cv.wait_for(lk, rel_time, [this] { return count > 0; })) {
+            return false;
+        }
+        --count;
+        return true;
+    }
+
+private:
+    std::mutex mutex;
+    std::condition_variable cv;
+    s64 count;
+};
+#endif
 
 template <s64 max>
 class Semaphore {
@@ -171,6 +217,8 @@ private:
     HANDLE sem;
 #elif defined(__APPLE__)
     dispatch_semaphore_t sem;
+#elif defined(SHADPS4_ENABLE_FEX_GUEST_CPU)
+    BlockingSemaphore<max> sem;
 #else
     std::counting_semaphore<max> sem;
 #endif
