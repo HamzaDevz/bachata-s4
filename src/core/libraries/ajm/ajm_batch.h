@@ -6,6 +6,7 @@
 #include "common/assert.h"
 #include "common/types.h"
 #include "core/libraries/ajm/ajm.h"
+#include "core/libraries/kernel/sync/semaphore.h"
 
 #include <boost/container/small_vector.hpp>
 
@@ -13,7 +14,6 @@
 #include <limits>
 #include <memory>
 #include <optional>
-#include <semaphore>
 #include <span>
 #include <vector>
 
@@ -53,7 +53,8 @@ struct AjmBatch {
     std::atomic_bool waiting{};
     std::atomic_bool canceled{};
     std::atomic_bool processed{};
-    std::binary_semaphore finished{0};
+    // The kernel semaphore blocks: a timed libstdc++ semaphore wait spins on sched_yield.
+    Libraries::Kernel::BinarySemaphore finished{0};
     boost::container::small_vector<AjmJob, 16> jobs;
 
     static std::shared_ptr<AjmBatch> FromBatchBuffer(std::span<u8> buffer);

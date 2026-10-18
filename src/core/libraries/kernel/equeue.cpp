@@ -282,6 +282,7 @@ int EqueueInternal::WaitForSmallTimer(OrbisKernelEvent* ev, int num, u32 micros)
     int count = 0;
     do {
         curr_clock = std::chrono::steady_clock::now();
+        auto next_expiry = wait_end_us;
         {
             std::scoped_lock lock{m_mutex};
             for (auto it = m_small_timers.begin(); it != m_small_timers.end() && count < num;) {
@@ -291,6 +292,7 @@ int EqueueInternal::WaitForSmallTimer(OrbisKernelEvent* ev, int num, u32 micros)
                     ev[count++] = st.event;
                     it = m_small_timers.erase(it);
                 } else {
+                    next_expiry = std::min(next_expiry, st.added + st.interval);
                     ++it;
                 }
             }
@@ -298,7 +300,17 @@ int EqueueInternal::WaitForSmallTimer(OrbisKernelEvent* ev, int num, u32 micros)
             if (count > 0)
                 return count;
         }
-        std::this_thread::yield();
+        // Sleep through most of the wait and only spin its end: the precision stays, but a
+        // thread ticking on short timers no longer keeps a core busy, which on handhelds is
+        // power and heat. The sleep is capped as other threads may add earlier timers.
+        constexpr auto SpinWindow = std::chrono::microseconds{200};
+        const auto until_spin = next_expiry - curr_clock - SpinWindow;
+        if (until_spin > std::chrono::nanoseconds::zero()) {
+            std::this_thread::sleep_for(
+                std::min<std::chrono::nanoseconds>(until_spin, std::chrono::milliseconds{1}));
+        } else {
+            std::this_thread::yield();
+        }
     } while (curr_clock < wait_end_us);
 
     return 0;
