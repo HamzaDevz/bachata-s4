@@ -409,9 +409,9 @@ SharpSources FindSharpSources(const IR::Inst* handle, u32 pc) {
     }
     if (sources.empty()) {
         if (found_read_const_buffer) {
-            UNREACHABLE_MSG("Bindless sharp access detected pc={:#x}", pc);
+            LOG_WARNING(Render_Recompiler, "Bindless sharp access detected pc={:#x}", pc);
         } else {
-            UNREACHABLE_MSG("Unable to find sharp sources pc={:#x}", pc);
+            LOG_WARNING(Render_Recompiler, "Unable to find sharp sources pc={:#x}", pc);
         }
     }
     return sources;
@@ -457,7 +457,19 @@ SharpLocation SharpLocationFromSource(const IR::Inst* inst) {
     }
 }
 
-SharpLocation TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, u32 pc = 0) {
+// A sharp that no single user data slot holds (loaded from a buffer, or picked at run time among
+// several) reads zeroed flat user data, which binds a null resource: that draw renders wrong
+// instead of the whole game stopping.
+SharpLocation NullSharpLocation(Info& info, u32 pc) {
+    LOG_WARNING(Render_Recompiler, "Binding a null resource for the sharp at pc={:#x}", pc);
+    const SharpLocation location = info.srt_info.flattened_bufsize_dw;
+    info.srt_info.flattened_bufsize_dw += 8;
+    info.flattened_ud_buf.resize(info.srt_info.flattened_bufsize_dw);
+    return location;
+}
+
+SharpLocation TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, Info& info,
+                         u32 pc = 0) {
     auto sources = FindSharpSources(inst, pc);
     size_t num_sources = sources.size();
     ASSERT(current_parent.cfg_block);
@@ -487,7 +499,9 @@ SharpLocation TrackSharp(const IR::Inst* inst, const IR::Block& current_parent, 
         }
     }
 
-    ASSERT_MSG(sources.size() == 1, "Unable to deduce sharp source");
+    if (sources.size() != 1) {
+        return NullSharpLocation(info, pc);
+    }
     return SharpLocationFromSource(sources[0]);
 }
 
@@ -521,7 +535,7 @@ void PatchBufferSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors&
         // Normal buffer resource.
         IR::Inst* buffer_handle = handle->Arg(0).InstRecursive();
         const auto inst_info = inst.Flags<IR::BufferInstInfo>();
-        const auto sharp_idx = TrackSharp(buffer_handle, block, inst_info.pc);
+        const auto sharp_idx = TrackSharp(buffer_handle, block, info, inst_info.pc);
         const auto buffer = info.ReadUdSharp<AmdGpu::Buffer>(sharp_idx);
         buffer_binding = descriptors.Add(BufferResource{
             .sharp_idx = sharp_idx,
@@ -544,7 +558,7 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
     // Read image sharp.
     const auto inst_info = inst.Flags<IR::TextureInstInfo>();
     const IR::Inst* image_handle = inst.Arg(0).InstRecursive();
-    const auto tsharp = TrackSharp(image_handle, block, inst_info.pc);
+    const auto tsharp = TrackSharp(image_handle, block, info, inst_info.pc);
     const bool is_atomic = IsImageAtomicInstruction(inst);
     const bool is_written = inst.GetOpcode() == IR::Opcode::ImageWrite || is_atomic;
     const bool is_storage =
@@ -653,7 +667,7 @@ void PatchImageSharp(IR::Block& block, IR::Inst& inst, Info& info, Descriptors& 
             // Normal sampler resource.
             const auto& [sampler_handle, disable_aniso] =
                 TryDisableAnisoLod0(sampler->Arg(0).InstRecursive());
-            const auto ssharp = TrackSharp(sampler_handle, block, inst_info.pc);
+            const auto ssharp = TrackSharp(sampler_handle, block, info, inst_info.pc);
             sampler_binding = descriptors.Add(SamplerResource{
                 .sharp_idx = ssharp,
                 .is_inline_sampler = false,
