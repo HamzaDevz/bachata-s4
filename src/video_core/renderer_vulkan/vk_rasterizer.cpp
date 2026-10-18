@@ -267,7 +267,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         buffer_cache.BindIndexBuffer(0);
     }
 
-    if (logged_launches.insert(pipeline).second) {
+    if (first_launch) {
         LOG_INFO(Render_Vulkan, "BACHATA_LAUNCH vs={:#x} indirect draw max_count={} count={:#x}",
                  pipeline->GetStage(Shader::LogicalStage::Vertex).pgm_hash, max_count,
                  count_address);
@@ -341,7 +341,7 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
-    if (logged_launches.insert(pipeline).second) {
+    if (first_launch) {
         LOG_INFO(Render_Vulkan, "BACHATA_LAUNCH cs={:#x} groups={}x{}x{}", cs.pgm_hash,
                  cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     }
@@ -365,7 +365,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         return;
     }
 
-    if (logged_launches.insert(pipeline).second) {
+    if (first_launch) {
         const auto* groups = reinterpret_cast<const u32*>(address + offset);
         LOG_INFO(Render_Vulkan, "BACHATA_LAUNCH cs={:#x} indirect groups={}x{}x{} (cpu view)",
                  pipeline->GetStage(Shader::LogicalStage::Compute).pgm_hash, groups[0], groups[1],
@@ -422,6 +422,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         pipeline != last_noted_pipeline || scheduler.CurrentTick() != last_noted_tick;
     last_noted_pipeline = pipeline;
     last_noted_tick = scheduler.CurrentTick();
+    first_launch = launched_pipelines.insert(pipeline).second;
 
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};

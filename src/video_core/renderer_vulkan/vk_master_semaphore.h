@@ -53,10 +53,12 @@ public:
     /// Remembers the shaders a submission runs, logged if the device is lost before it completes.
     void RecordWork(u64 tick, std::vector<u64>&& shader_hashes);
 
-    /// Logs the shaders of the submissions the GPU did not complete.
+    /// Logs the shaders of the submissions the GPU did not complete, on every queue timeline.
     void LogWorkInFlight();
 
 protected:
+    void LogOwnWorkInFlight();
+
     const Instance& instance;
     vk::UniqueSemaphore semaphore;    ///< Timeline semaphore.
     std::atomic<u64> gpu_tick{0};     ///< Current known GPU tick.

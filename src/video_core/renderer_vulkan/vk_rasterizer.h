@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -117,6 +118,9 @@ private:
             texture_cache.GetImage(image_id).binding = {};
         }
         bound_images.clear();
+        if (std::exchange(first_launch, false)) {
+            Flush();
+        }
     }
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
@@ -149,8 +153,10 @@ private:
     u32 set_write_index{};
     const Pipeline* last_noted_pipeline{};
     u64 last_noted_tick{};
-    // Pipelines whose first indirect or direct launch was logged.
-    std::unordered_set<const Pipeline*> logged_launches;
+    // Pipelines launched at least once. The first launch of each is submitted on its own, so a
+    // GPU hang names the work that caused it.
+    std::unordered_set<const Pipeline*> launched_pipelines;
+    bool first_launch{};
     Pipeline::DescriptorWrites set_writes;
     Pipeline::BufferBarriers buffer_barriers;
     Shader::PushData push_data;

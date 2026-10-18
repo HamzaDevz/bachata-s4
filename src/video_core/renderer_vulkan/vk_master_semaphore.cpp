@@ -14,6 +14,10 @@ namespace Vulkan {
 
 constexpr u64 WAIT_TIMEOUT = std::numeric_limits<u64>::max();
 
+// Every timeline, so a device lost noticed by one scheduler also names the work of the others.
+static std::mutex semaphores_mutex;
+static std::vector<MasterSemaphore*> semaphores;
+
 MasterSemaphore::MasterSemaphore(const Instance& instance_) : instance{instance_} {
     std::fprintf(stderr, "BACHATA_MASTER_SEMAPHORE_ENTER\n");
     const vk::StructureChain semaphore_chain = {
@@ -28,10 +32,15 @@ MasterSemaphore::MasterSemaphore(const Instance& instance_) : instance{instance_
     ASSERT_MSG(semaphore_result == vk::Result::eSuccess, "Failed to create master semaphore: {}",
                vk::to_string(semaphore_result));
     semaphore = std::move(sem);
+    std::scoped_lock lk{semaphores_mutex};
+    semaphores.push_back(this);
     std::fprintf(stderr, "BACHATA_MASTER_SEMAPHORE_READY\n");
 }
 
-MasterSemaphore::~MasterSemaphore() = default;
+MasterSemaphore::~MasterSemaphore() {
+    std::scoped_lock lk{semaphores_mutex};
+    std::erase(semaphores, this);
+}
 
 void MasterSemaphore::Refresh() {
     u64 this_tick{};
@@ -86,12 +95,19 @@ void MasterSemaphore::RecordWork(u64 tick, std::vector<u64>&& shader_hashes) {
 }
 
 void MasterSemaphore::LogWorkInFlight() {
+    std::scoped_lock lk{semaphores_mutex};
+    for (MasterSemaphore* const timeline : semaphores) {
+        timeline->LogOwnWorkInFlight();
+    }
+}
+
+void MasterSemaphore::LogOwnWorkInFlight() {
     std::scoped_lock lk{work_mutex};
     const u64 known_tick = KnownGpuTick();
     for (u64 tick = known_tick + 1; tick < CurrentTick() && tick <= known_tick + work_in_flight.size();
          ++tick) {
         const auto& [record_tick, shader_hashes] = work_in_flight[tick % work_in_flight.size()];
-        if (record_tick != tick) {
+        if (record_tick != tick || shader_hashes.empty()) {
             continue;
         }
         std::string text;
