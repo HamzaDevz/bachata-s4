@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -152,9 +153,17 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 #endif
 }
 
+void Scheduler::NoteWork(u64 shader_hash) {
+    if (std::ranges::find(recorded_work, shader_hash) == recorded_work.end()) {
+        recorded_work.push_back(shader_hash);
+    }
+}
+
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
     const u64 signal_value = master_semaphore.NextTick();
+    master_semaphore.RecordWork(signal_value, std::move(recorded_work));
+    recorded_work.clear();
     if (signal_value > MAX_IN_FLIGHT_SUBMISSIONS) {
         master_semaphore.Wait(signal_value - MAX_IN_FLIGHT_SUBMISSIONS);
     }

@@ -3,10 +3,12 @@
 
 #include <limits>
 #include <cstdio>
+#include <string>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 
 namespace Vulkan {
 
@@ -37,6 +39,9 @@ void MasterSemaphore::Refresh() {
     do {
         this_tick = gpu_tick.load(std::memory_order_acquire);
         auto [counter_result, cntr] = instance.GetDevice().getSemaphoreCounterValue(*semaphore);
+        if (counter_result != vk::Result::eSuccess) {
+            LogWorkInFlight();
+        }
         ASSERT_MSG(counter_result == vk::Result::eSuccess,
                    "Failed to get master semaphore value: {}", vk::to_string(counter_result));
         counter = cntr;
@@ -65,9 +70,36 @@ void MasterSemaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
+    vk::Result result;
+    while ((result = instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT)) !=
+           vk::Result::eSuccess) {
+        if (result == vk::Result::eErrorDeviceLost) {
+            break;
+        }
     }
     Refresh();
+}
+
+void MasterSemaphore::RecordWork(u64 tick, std::vector<u64>&& shader_hashes) {
+    std::scoped_lock lk{work_mutex};
+    work_in_flight[tick % work_in_flight.size()] = {tick, std::move(shader_hashes)};
+}
+
+void MasterSemaphore::LogWorkInFlight() {
+    std::scoped_lock lk{work_mutex};
+    const u64 known_tick = KnownGpuTick();
+    for (u64 tick = known_tick + 1; tick < CurrentTick() && tick <= known_tick + work_in_flight.size();
+         ++tick) {
+        const auto& [record_tick, shader_hashes] = work_in_flight[tick % work_in_flight.size()];
+        if (record_tick != tick) {
+            continue;
+        }
+        std::string text;
+        for (const u64 hash : shader_hashes) {
+            text += fmt::format(" {:#x}", hash);
+        }
+        LOG_CRITICAL(Render_Vulkan, "BACHATA_GPU_WORK_IN_FLIGHT tick={} shaders:{}", tick, text);
+    }
 }
 
 } // namespace Vulkan

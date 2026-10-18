@@ -370,6 +370,9 @@ public:
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
 
+    /// Notes a shader the work being recorded runs, to name it if the device is lost.
+    void NoteWork(u64 shader_hash);
+
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
 
@@ -454,6 +457,7 @@ private:
     RenderState render_state;
     bool is_rendering = false;
     tracy::VkCtxScope* profiler_scope{};
+    std::vector<u64> recorded_work;
 };
 
 } // namespace Vulkan

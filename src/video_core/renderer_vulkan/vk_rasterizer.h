@@ -146,6 +146,8 @@ private:
     boost::container::small_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
 
     u32 set_write_index{};
+    const Pipeline* last_noted_pipeline{};
+    u64 last_noted_tick{};
     Pipeline::DescriptorWrites set_writes;
     Pipeline::BufferBarriers buffer_barriers;
     Shader::PushData push_data;

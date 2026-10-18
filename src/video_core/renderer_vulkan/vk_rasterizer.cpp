@@ -401,6 +401,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     image_infos.clear();
 
     bool uses_dma = false;
+    const bool note_work =
+        pipeline != last_noted_pipeline || scheduler.CurrentTick() != last_noted_tick;
+    last_noted_pipeline = pipeline;
+    last_noted_tick = scheduler.CurrentTick();
 
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
@@ -408,6 +412,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
+        }
+        if (note_work) {
+            scheduler.NoteWork(stage->pgm_hash);
         }
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
