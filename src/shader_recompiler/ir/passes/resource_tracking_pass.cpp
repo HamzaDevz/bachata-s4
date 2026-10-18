@@ -712,28 +712,35 @@ void PatchGlobalDataShareAccess(IR::Block& block, IR::Inst& inst, Info& info,
             return std::nullopt;
         };
 
-        u32 gds_addr = 0;
         const IR::Value& gds_offset = inst.Arg(0);
+        const IR::Inst* prod = gds_offset.TryInstRecursive();
+        IR::U32 index;
         if (gds_offset.IsImmediate()) {
             // Nothing to do, offset is known.
-            gds_addr = gds_offset.U32() & 0xFFFF;
-        } else {
-            const auto result = IR::BreadthFirstSearch(&inst, pred);
-            ASSERT_MSG(result, "Unable to track M0 source");
-
-            // M0 must be set by some user data register.
-            const IR::Inst* prod = gds_offset.InstRecursive();
+            index = ir.Imm32((gds_offset.U32() & 0xFFFF) >> 2);
+        } else if (const auto result = IR::BreadthFirstSearch(&inst, pred)) {
+            // M0 set by some user data register.
             const u32 ud_reg = u32(result.value()->Arg(0).ScalarReg());
             u32 m0_val = info.user_data[ud_reg] >> 16;
             if (prod->GetOpcode() == IR::Opcode::IAdd32) {
                 m0_val += prod->Arg(1).U32();
             }
-            gds_addr = m0_val & 0xFFFF;
+            index = ir.Imm32((m0_val & 0xFFFF) >> 2);
+        } else {
+            // M0 read from memory: the shader takes the address out of it.
+            IR::U32 m0{gds_offset};
+            IR::U32 inst_offset = ir.Imm32(0u);
+            if (prod->GetOpcode() == IR::Opcode::IAdd32) {
+                m0 = IR::U32{prod->Arg(0)};
+                inst_offset = IR::U32{prod->Arg(1)};
+            }
+            const IR::U32 gds_addr = ir.BitwiseAnd(
+                ir.IAdd(ir.ShiftRightLogical(m0, ir.Imm32(16u)), inst_offset), ir.Imm32(0xFFFFu));
+            index = ir.ShiftRightLogical(gds_addr, ir.Imm32(2u));
         }
 
         // Patch instruction to GDS buffer atomic increment/decrement.
         const IR::U32 handle = ir.Imm32(binding);
-        const IR::U32 index = ir.Imm32(gds_addr >> 2);
         const bool is_append = inst.GetOpcode() == IR::Opcode::DataAppend;
         const IR::Value prev = is_append ? ir.BufferAtomicInc(handle, index, {})
                                          : ir.BufferAtomicDec(handle, index, {});
