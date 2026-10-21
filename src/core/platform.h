@@ -10,6 +10,7 @@
 
 #include <magic_enum/magic_enum.hpp>
 
+#include <algorithm>
 #include <functional>
 #include <mutex>
 #include <unordered_map>
@@ -110,15 +111,38 @@ struct IrqController {
             h(irq);
         }
 
-        const auto it = ctx.keyed_one_time_subscribers.find(token);
-        ASSERT_MSG(it != ctx.keyed_one_time_subscribers.end(),
-                   "Unknown one-time IRQ token: irq={} token={} last_registered={} "
-                   "last_completed={} pending={}",
-                   magic_enum::enum_name(irq), token, ctx.last_registered_token,
-                   ctx.last_completed_token, ctx.keyed_one_time_subscribers.size());
-        it->second(irq);
-        ctx.last_completed_token = token;
-        ctx.keyed_one_time_subscribers.erase(it);
+        auto& subscribers = ctx.keyed_one_time_subscribers;
+        if (!subscribers.contains(token)) {
+            // The GPU parses a submitted command buffer when it gets to it: a game that submits
+            // the same buffer again before then (the GPU thread held up, by shader compiles or a
+            // slow host GPU) has its flip packet rewritten with the newer token, read once for
+            // each submission. The first read completed both flips; this one has none left.
+            ASSERT_MSG(token <= ctx.last_registered_token,
+                       "Unknown one-time IRQ token: irq={} token={} last_registered={} "
+                       "last_completed={} pending={}",
+                       magic_enum::enum_name(irq), token, ctx.last_registered_token,
+                       ctx.last_completed_token, subscribers.size());
+            LOG_WARNING(Core,
+                        "Stale one-time IRQ token: irq={} token={} last_completed={} pending={}",
+                        magic_enum::enum_name(irq), token, ctx.last_completed_token,
+                        subscribers.size());
+            return;
+        }
+        // Flips complete in submission order: an older one whose packet was rewritten completes
+        // first.
+        for (;;) {
+            const auto oldest = std::ranges::min_element(
+                subscribers, {}, [](const auto& subscriber) { return subscriber.first; });
+            const u32 completed = oldest->first;
+            oldest->second(irq);
+            ctx.last_completed_token = completed;
+            subscribers.erase(oldest);
+            if (completed == token) {
+                break;
+            }
+            LOG_WARNING(Core, "One-time IRQ token completed out of a rewritten packet: irq={} "
+                        "token={} read={}", magic_enum::enum_name(irq), completed, token);
+        }
     }
 
 private:
