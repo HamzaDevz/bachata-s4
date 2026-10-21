@@ -22,10 +22,13 @@ os.replace(tmp_path, zip_path)
 
 with open(manifest_path) as f:
     manifest = json.load(f)
-manifest["runtimeVersion"] = runtime_version
 entry = next(e for e in manifest["files"] if e["path"] == TARGET)
 entry["size"] = len(core)
 entry["sha256"] = hashlib.sha256(core).hexdigest()
+# The app keeps an extracted runtime whose folder (runtimeVersion) already exists: name it after the core's content too,
+# or a rebuilt core under the same commit is never installed.
+runtime_version = f"{runtime_version}-{entry['sha256'][:8]}"
+manifest["runtimeVersion"] = runtime_version
 with open(manifest_path, "w") as f:
     json.dump(manifest, f, indent=2)
     f.write("\n")
