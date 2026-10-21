@@ -299,7 +299,9 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
         return;
     }
 
-    WaitGpuIdle();
+    // No WaitGpuIdle here: the graphics queue a game submitted before sceGnmSubmitDone can wait
+    // (WAIT_REG_MEM) on a label this compute queue writes, so the GPU is never idle until this
+    // dispatch runs (Bloodborne's loading screen, whenever the GPU is still busy at SubmitDone).
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
