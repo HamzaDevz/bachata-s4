@@ -132,6 +132,7 @@ void Liverpool::Process(std::stop_token stoken) {
         curr_qid = -1;
         u32 idle_resumes = 0;
         std::chrono::microseconds idle_sleep{};
+        std::chrono::steady_clock::time_point idle_since{};
 
         while (num_submits || num_commands) {
             const u64 work_before = work_done;
@@ -177,10 +178,29 @@ void Liverpool::Process(std::stop_token stoken) {
             if (work_done != work_before || task_done) {
                 idle_resumes = 0;
                 idle_sleep = {};
+                idle_since = {};
             } else if (++idle_resumes >= 64) {
                 idle_resumes = 0;
                 idle_sleep = std::min(std::max(idle_sleep * 2, std::chrono::microseconds{20}),
                                       std::chrono::microseconds{500});
+                // What a queue waits on may only be written once the guest has submitted again,
+                // which a sceGnmSubmitDone issued while the GPU was busy holds until it is idle
+                // (Bloodborne in the Hunter's Dream, the GPU behind): after 50 ms of waiting, let
+                // the guest submit (the submission lock is GpuIdle's one handler).
+                const auto now = std::chrono::steady_clock::now();
+                if (idle_since == std::chrono::steady_clock::time_point{}) {
+                    idle_since = now;
+                } else if (now - idle_since >= std::chrono::milliseconds{50}) {
+                    idle_since = now;
+                    static u64 releases = 0;
+                    if ((++releases & (releases - 1)) == 0) {
+                        LOG_WARNING(Render_Vulkan,
+                                    "GPU waiting on memory for 50 ms: submission lock released "
+                                    "({} times)",
+                                    releases);
+                    }
+                    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+                }
                 std::unique_lock lk{submit_mutex};
                 const u32 submits = num_submits;
                 submit_cv.wait_for(lk, idle_sleep,
@@ -1478,17 +1498,29 @@ Liverpool::CmdBuffer Liverpool::CopyCmdBuffers(std::span<const u32> dcb, std::sp
 
     // The copy buffers persist across submissions so the GPU worker can parse a
     // command buffer even after the guest reuses its source ring. Their offsets
-    // therefore grow monotonically and are only reset once the buffered data is no
-    // longer needed. The guest is expected to signal that point with
-    // sceGnmSubmitDone (-> SubmitDone), but some titles (e.g. Dark Souls
-    // Remastered) never call it, so the offset would otherwise overflow the
-    // reserved space and trip the assert below. When the next append would exceed
-    // the reservation, drain the GPU first (all previously buffered spans have
-    // then been consumed and can be discarded) and rewind the offsets to zero.
+    // therefore grow monotonically and are only rewound once the GPU has run every
+    // copy: not at sceGnmSubmitDone, as a GPU waiting on memory the guest writes after
+    // its next submission lets it submit before (Process), and some titles (e.g. Dark
+    // Souls Remastered) never call it. When the next append would exceed the
+    // reservation, drain the GPU first; one waiting on the guest never drains: past
+    // 100 ms, the full copies are set aside until it has run them.
+    if (IsGpuIdle()) {
+        queue.retired_buffers.clear();
+        queue.dcb_buffer_offset = 0;
+        queue.ccb_buffer_offset = 0;
+    }
     const bool dcb_overflows = queue.dcb_buffer_offset + dcb.size() > queue.dcb_buffer.capacity();
     const bool ccb_overflows = queue.ccb_buffer_offset + ccb.size() > queue.ccb_buffer.capacity();
     if (dcb_overflows || ccb_overflows) {
-        WaitGpuIdle();
+        std::unique_lock lk{submit_mutex};
+        if (!submit_cv.wait_for(lk, std::chrono::milliseconds{100},
+                                [this] { return num_submits == 0; })) {
+            for (auto* buffer : {&queue.dcb_buffer, &queue.ccb_buffer}) {
+                std::vector<u32> fresh;
+                fresh.reserve(buffer->capacity());
+                queue.retired_buffers.push_back(std::exchange(*buffer, std::move(fresh)));
+            }
+        }
         queue.dcb_buffer_offset = 0;
         queue.ccb_buffer_offset = 0;
     }

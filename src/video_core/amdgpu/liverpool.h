@@ -74,8 +74,8 @@ public:
 
     void SubmitDone() noexcept {
         std::scoped_lock lk{submit_mutex};
-        mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
-        mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
+        // The command buffer copies are rewound once the GPU has run them (CopyCmdBuffers): the
+        // submission lock may let the guest submit again before (Process)
         submit_done = true;
         submit_cv.notify_one();
     }
@@ -209,6 +209,7 @@ private:
         std::atomic<u32> ccb_buffer_offset;
         std::vector<u32> dcb_buffer;
         std::vector<u32> ccb_buffer;
+        std::vector<std::vector<u32>> retired_buffers{}; ///< Full copies the GPU has yet to run
         std::queue<Task::Handle> submits{};
         ComputeProgram cs_state{};
     };
